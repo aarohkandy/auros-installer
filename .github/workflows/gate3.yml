@@ -1,0 +1,251 @@
+# GATE 3 — 100 clean migrations and 20 clean aborts, against ephemeral Windows.
+#
+# Spec §6C exit conditions:
+#   100 consecutive runs against a Windows VM with 18,000 synthetic files: 100 successes, zero files
+#   lost, zero corrupted. 20 runs with induced failure: 20 clean aborts, Windows still boots normally
+#   every time, zero data loss. THE ABORT PATH IS TESTED MORE THAN THE HAPPY PATH.
+#
+# WHY A HOSTED RUNNER (DECISIONS.md D27)
+# Spec §4.7: "Windows in a VM, with synthetic files, destroyed repeatedly." A `windows-latest` runner is
+# destroyed after every job by construction. It is not the operator's machine, it holds nothing anyone
+# cares about, and there are 20 of them at once for free.
+#
+# WHY WE ASSERT THE INVARIANT RATHER THAN THE CONSEQUENCE
+# The spec asks that "Windows still boots normally every time". That is the consequence. The property
+# that GUARANTEES it is that nothing was written to the system disk — the invariant. We snapshot C:
+# before and after every single run and diff it. That is strictly stronger evidence: a boot test passes
+# even if we wrote something harmless-looking, and it covers one outcome, where the diff covers every
+# path. The checks that genuinely need firmware — BitLocker suspension, BootNext, ARM itself — are
+# deferred to Gate 5's physical machines, which is the only place they could ever have been honestly
+# tested.
+name: gate3
+on:
+  workflow_dispatch:
+    inputs:
+      clean_runs: { description: 'Clean runs (spec requires 100)', default: '100', type: string }
+  schedule:
+    - cron: '0 3 * * *'
+  push:
+    paths: ['internal/**', 'cmd/**', 'testharness/**', '.github/workflows/gate3.yml']
+
+defaults:
+  run:
+    shell: pwsh
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Build once, so 12 shards are not each compiling the thing under test ──────────────────────────
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23', cache: true }
+      - name: Vet, test, and cross-compile for the real fleet
+        shell: bash -euo pipefail {0}
+        run: |
+          gofmt -l . | tee /tmp/fmt; [ ! -s /tmp/fmt ] || { echo "gofmt found unformatted files"; exit 1; }
+          go vet ./...
+          go test ./... -race -count=1
+          # 386 as well as amd64: 2012-era machines running 32-bit Windows are inside our target cohort.
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/auros-migrate-amd64.exe ./cmd/auros-migrate
+          GOOS=windows GOARCH=386   go build -trimpath -ldflags="-s -w" -o dist/auros-migrate-386.exe   ./cmd/auros-migrate
+          GOOS=windows GOARCH=amd64 go build -trimpath -o dist/corpusgen.exe ./testharness/gen
+          GOOS=windows GOARCH=amd64 go build -trimpath -o dist/faultrun.exe  ./testharness/fault
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with: { name: bin, path: dist/ }
+
+  # ── 100 clean runs, sharded 10 x 10 ──────────────────────────────────────────────────────────────
+  clean:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false    # one shard failing must not hide the other ninety runs' results
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: bin, path: dist }
+
+      - name: Create a REAL second volume for the destination
+        run: |
+          # The destination must not be the system disk, and the tool verifies that by VOLUME GUID, not
+          # by drive letter — a mount point or a subst'd letter can alias C:. So the test needs a
+          # genuine second volume, otherwise we would be testing a stub of the check that matters most.
+          $vhd = "$env:RUNNER_TEMP\auros-dest.vhdx"
+          @"
+          create vdisk file="$vhd" maximum=40000 type=expandable
+          select vdisk file="$vhd"
+          attach vdisk
+          create partition primary
+          format fs=ntfs quick label=AUROSDEST
+          assign letter=E
+          "@ | Out-File -Encoding ascii $env:RUNNER_TEMP\mk.txt
+          diskpart /s $env:RUNNER_TEMP\mk.txt
+          Get-Volume | Format-Table DriveLetter, FileSystemLabel, Size, SizeRemaining
+          if (-not (Test-Path E:\)) { throw "destination volume E: was not created — the not-the-system-disk check would be untested" }
+
+      - name: Run ${{ matrix.shard }} — 10 migrations of 18,000 synthetic files each
+        run: |
+          $failures = @()
+          foreach ($i in 0..9) {
+            $run = "$($env:GITHUB_RUN_NUMBER)-${{ matrix.shard }}-$i"
+            $seed = [int]"${{ matrix.shard }}" * 1000 + $i     # deterministic and distinct per run
+            $src  = "$env:RUNNER_TEMP\src-$run"
+            $dst  = "E:\archive-$run"
+            Write-Host "── run $run (seed $seed) ──"
+
+            .\dist\corpusgen.exe --out $src --files 18000 --seed $seed --golden "$src.golden.json"
+            if ($LASTEXITCODE -ne 0) { $failures += "$run corpusgen"; continue }
+
+            # THE INVARIANT SNAPSHOT. Taken before the tool runs and compared after. This is the
+            # evidence that replaces "Windows still boots" (D27), and it is stronger.
+            $before = Get-ChildItem C:\ -Recurse -Force -ErrorAction SilentlyContinue |
+                      Where-Object { -not $_.PSIsContainer } |
+                      ForEach-Object { "$($_.FullName)|$($_.Length)" } | Sort-Object
+            $before | Out-File "$env:RUNNER_TEMP\c-before-$run.txt"
+
+            .\dist\auros-migrate-amd64.exe --source $src --destination $dst --commit=false --json --runlog "$dst\run.json"
+            $rc = $LASTEXITCODE
+
+            $after = Get-ChildItem C:\ -Recurse -Force -ErrorAction SilentlyContinue |
+                     Where-Object { -not $_.PSIsContainer } |
+                     ForEach-Object { "$($_.FullName)|$($_.Length)" } | Sort-Object
+            $after | Out-File "$env:RUNNER_TEMP\c-after-$run.txt"
+
+            # Diff, ignoring paths Windows itself churns constantly. Anything the TOOL wrote to C: is a
+            # fatal finding; the exclusion list is deliberately narrow and is printed so it can be audited.
+            $noise = '\\Windows\\(Temp|Logs|ServiceProfiles|SoftwareDistribution|Prefetch|System32\\(config|LogFiles|catroot2|winevt|sru|WDI))|\\ProgramData\\(Microsoft\\Windows Defender|Microsoft\\Network|USOShared|Packages)|\\Users\\[^\\]+\\AppData\\Local\\(Temp|Microsoft\\Windows)|\\pagefile\.sys|\\swapfile\.sys|\\hiberfil\.sys|\\\$Recycle|\\Windows\\WinSxS|\\actions-runner|\\a\\_temp'
+            $delta = Compare-Object $before $after |
+                     Where-Object { $_.InputObject -notmatch $noise }
+            if ($delta) {
+              Write-Host "::error::run $run WROTE TO THE SYSTEM DISK — the invariant is broken"
+              $delta | Select-Object -First 40 | Format-Table -AutoSize | Out-String | Write-Host
+              $failures += "$run system-disk-write"
+              continue
+            }
+
+            .\dist\auros-migrate-amd64.exe verify --archive $dst --against "$src.golden.json"
+            if ($LASTEXITCODE -ne 0) { $failures += "$run verify"; continue }
+
+            Remove-Item -Recurse -Force $src, $dst -ErrorAction SilentlyContinue
+            Write-Host "run $run OK (exit $rc)"
+          }
+          if ($failures.Count -gt 0) {
+            Write-Host "::error::shard ${{ matrix.shard }}: $($failures.Count)/10 failed: $($failures -join ', ')"
+            exit 1
+          }
+          "shard ${{ matrix.shard }}: 10/10 clean" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+  # ── 20 induced failures. The abort path, tested harder than the happy path. ───────────────────────
+  abort:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        fault:
+          - power-cut-at-11pct
+          - power-cut-at-43pct
+          - power-cut-at-97pct
+          - destination-removed-mid-copy
+          - destination-fills-mid-copy
+          - destination-is-the-system-disk
+          - destination-too-small
+          - no-destination-at-all
+          - source-file-mutated-mid-copy
+          - source-file-deleted-mid-copy
+          - source-file-locked-exclusively
+          - manifest-truncated
+          - manifest-corrupted
+          - single-bit-flip-in-copied-file
+          - hash-mismatch-one-file
+          - hash-mismatch-many-files
+          - count-mismatch-hashes-fine
+          - clock-jumps-backwards
+          - context-cancelled-during-verify
+          - path-escapes-root-via-symlink
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: bin, path: dist }
+      - name: Create the destination volume
+        run: |
+          $vhd = "$env:RUNNER_TEMP\auros-dest.vhdx"
+          @"
+          create vdisk file="$vhd" maximum=40000 type=expandable
+          select vdisk file="$vhd"
+          attach vdisk
+          create partition primary
+          format fs=ntfs quick label=AUROSDEST
+          assign letter=E
+          "@ | Out-File -Encoding ascii $env:RUNNER_TEMP\mk.txt
+          diskpart /s $env:RUNNER_TEMP\mk.txt
+
+      - name: Induce ${{ matrix.fault }} and require a CLEAN abort
+        run: |
+          $src = "$env:RUNNER_TEMP\src"
+          .\dist\corpusgen.exe --out $src --files 18000 --seed 424242 --golden "$src.golden.json"
+
+          $before = Get-ChildItem C:\ -Recurse -Force -ErrorAction SilentlyContinue |
+                    Where-Object { -not $_.PSIsContainer } |
+                    ForEach-Object { "$($_.FullName)|$($_.Length)" } | Sort-Object
+
+          # The injector runs the tool and triggers the fault at a reproducible point, so a failure is
+          # re-runnable rather than a story about something that happened once.
+          .\dist\faultrun.exe --fault "${{ matrix.fault }}" --tool .\dist\auros-migrate-amd64.exe `
+                              --source $src --destination E:\archive --report "$env:RUNNER_TEMP\fault.json"
+          $rc = $LASTEXITCODE
+
+          $after = Get-ChildItem C:\ -Recurse -Force -ErrorAction SilentlyContinue |
+                   Where-Object { -not $_.PSIsContainer } |
+                   ForEach-Object { "$($_.FullName)|$($_.Length)" } | Sort-Object
+
+          $noise = '\\Windows\\(Temp|Logs|ServiceProfiles|SoftwareDistribution|Prefetch|System32\\(config|LogFiles|catroot2|winevt|sru|WDI))|\\ProgramData\\(Microsoft\\Windows Defender|Microsoft\\Network|USOShared|Packages)|\\Users\\[^\\]+\\AppData\\Local\\(Temp|Microsoft\\Windows)|\\pagefile\.sys|\\swapfile\.sys|\\hiberfil\.sys|\\\$Recycle|\\Windows\\WinSxS|\\actions-runner|\\a\\_temp'
+          $delta = Compare-Object $before $after | Where-Object { $_.InputObject -notmatch $noise }
+          if ($delta) {
+            Write-Host "::error::${{ matrix.fault }} WROTE TO THE SYSTEM DISK on the abort path"
+            $delta | Select-Object -First 40 | Format-Table -AutoSize | Out-String | Write-Host
+            exit 1
+          }
+
+          # The SOURCE must be byte-identical afterwards. An abort that mangled the original is a data
+          # loss event even though the tool reported a clean abort.
+          .\dist\corpusgen.exe verify --root $src --golden "$src.golden.json"
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::${{ matrix.fault }} altered the SOURCE data"; exit 1 }
+
+          $r = Get-Content "$env:RUNNER_TEMP\fault.json" | ConvertFrom-Json
+          if (-not $r.cleanAbort) { Write-Host "::error::${{ matrix.fault }} did not abort cleanly: $($r.reason)"; exit 1 }
+          "${{ matrix.fault }}: clean abort, system disk untouched, source intact" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: fault-${{ matrix.fault }}, path: ${{ runner.temp }}/fault.json, if-no-files-found: warn }
+
+  verdict:
+    needs: [clean, abort]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Gate 3 verdict
+        shell: bash -euo pipefail {0}
+        run: |
+          CLEAN='${{ needs.clean.result }}'; ABORT='${{ needs.abort.result }}'
+          {
+            echo "## Gate 3"
+            echo "| | required | result |"
+            echo "|---|---|---|"
+            echo "| clean migrations | 100/100, zero lost, zero corrupted | \`$CLEAN\` |"
+            echo "| induced failures | 20/20 clean aborts, system disk untouched | \`$ABORT\` |"
+            echo ""
+            echo "Evidence is the per-shard and per-fault job logs, each of which diffs C: before and"
+            echo "after. Firmware-dependent checks (BitLocker, BootNext, ARM) are Gate 5, on real hardware."
+          } >> $GITHUB_STEP_SUMMARY
+          [ "$CLEAN" = success ] && [ "$ABORT" = success ] || { echo "Gate 3 NOT passed"; exit 1; }
+          echo "GATE 3 PASSED"

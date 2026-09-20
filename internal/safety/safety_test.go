@@ -65,10 +65,12 @@ func newFixture(t *testing.T, files map[string]string) *fixture {
 		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		e := manifest.Entry{
-			Path:            rel, Stored: rel, Size: int64(len(content)),
-			ModTimeUnixNano: 1700000000, SHA256: testsupport.SHA256(content),
-		}
+		e := manifest.Entry{}
+		e.Path = rel
+		e.Stored = rel
+		e.Size = int64(len(content))
+		e.ModTimeUnixNano = 1700000000
+		e.SHA256 = testsupport.SHA256(content)
 		if len(content) == 0 {
 			e.SHA256 = manifest.EmptySHA256
 		}
@@ -79,14 +81,17 @@ func newFixture(t *testing.T, files map[string]string) *fixture {
 
 	buf := &bytes.Buffer{}
 	fixed := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
-	return &fixture{
-		sysDir:    sys, destDir: dest,
-		sysBefore: testsupport.Snapshot(t, sys),
-		man:       man,
-		q:         quarantine.NewSet(func() time.Time { return fixed }),
-		log:       runlog.NewWriter(buf, func() time.Time { return fixed }),
-		logBuf:    buf,
-	}
+	clock := func() time.Time { return fixed }
+
+	f := &fixture{}
+	f.sysDir = sys
+	f.destDir = dest
+	f.sysBefore = testsupport.Snapshot(t, sys)
+	f.man = man
+	f.q = quarantine.NewSet(clock)
+	f.logBuf = buf
+	f.log = runlog.NewWriter(buf, clock)
+	return f
 }
 
 func (f *fixture) req() VerifyRequest {

@@ -1,7 +1,6 @@
 package fault
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -300,49 +299,77 @@ type HostFire struct {
 	Index      int
 }
 
-// HostAwait blocks reading the control channel until the guest reports that the trigger fired.
+// ControlKind is what a line on the control channel turned out to be.
+type ControlKind string
+
+const (
+	CtlNone   ControlKind = ""
+	CtlRecord ControlKind = "record" // a FireRecord, sent BEFORE the action is dispatched
+	CtlFire   ControlKind = "fire"   // the guest asking the host to execute a host-site action
+	CtlBeacon ControlKind = "beacon" // the guest reporting that it reached a state
+	CtlExit   ControlKind = "exit"   // the installer's exit code, echoed by the guest's run script
+	CtlLog    ControlKind = "log"    // free text
+)
+
+// ControlLine is one parsed line.
+type ControlLine struct {
+	Kind   ControlKind
+	Raw    string
+	Fire   HostFire
+	Record FireRecord
+	Exit   int
+	Text   string
+}
+
+// ParseControlLine is a pure function so that the runner can multiplex ONE reader over the control
+// channel — fire requests, fire records, beacons, the installer's exit code and free text all share the
+// single serial line, and a helper that consumed the stream to wait for one of them would throw the
+// others away.
 //
-// A read error or EOF means the guest died first — which for a power-cut scenario is not necessarily
-// wrong, but it does mean the host did not cause it, and that distinction belongs in the record rather
-// than in somebody's recollection. Close the underlying reader to unblock on timeout.
-func HostAwait(r io.Reader, log Logger) (HostFire, FireRecord, error) {
-	if log == nil {
-		log = func(string, ...any) {}
+// Lines from Go programs are tab-separated. `exit` and `beacon` also accept spaces, because they are
+// emitted by a Windows batch file where producing a literal tab is a small adventure.
+func ParseControlLine(line string) ControlLine {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ControlLine{Kind: CtlNone, Raw: line}
 	}
-	var rec FireRecord
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 1<<16), 1<<22)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
+	out := ControlLine{Raw: line}
+	tabs := strings.Split(line, "\t")
+	switch {
+	case tabs[0] == "record" && len(tabs) >= 2:
+		out.Kind = CtlRecord
+		if err := json.Unmarshal([]byte(tabs[1]), &out.Record); err != nil {
+			out.Kind = CtlLog
+			out.Text = "unparseable fire record: " + err.Error()
 		}
-		f := strings.Split(line, "\t")
-		switch {
-		case f[0] == "record" && len(f) >= 2:
-			// The FireRecord, sent before the action is dispatched. For the power-cut scenarios this is
-			// the ONLY copy that survives, because the guest stops existing a few milliseconds later.
-			var parsed FireRecord
-			if err := json.Unmarshal([]byte(f[1]), &parsed); err != nil {
-				log("control: unparseable fire record: %v", err)
-				continue
+	case tabs[0] == "fire" && len(tabs) >= 5:
+		out.Kind = CtlFire
+		bytesDone, _ := strconv.ParseInt(tabs[3], 10, 64)
+		idx, _ := strconv.Atoi(tabs[4])
+		out.Fire = HostFire{ScenarioID: tabs[1], Action: Action(tabs[2]), BytesDone: bytesDone, Index: idx}
+	default:
+		f := strings.Fields(strings.ReplaceAll(line, "\t", " "))
+		switch f[0] {
+		case "exit":
+			out.Kind = CtlExit
+			if len(f) >= 2 {
+				n, err := strconv.Atoi(f[1])
+				if err != nil {
+					out.Kind = CtlLog
+					out.Text = line
+				} else {
+					out.Exit = n
+				}
 			}
-			rec = parsed
-			log("control: fire record for %s received (fired=%v overshoot=%d)",
-				rec.ScenarioID, rec.Fired, rec.OvershootBytes)
-		case f[0] == "fire" && len(f) >= 5:
-			bytesDone, _ := strconv.ParseInt(f[3], 10, 64)
-			idx, _ := strconv.Atoi(f[4])
-			log("control: %s", line)
-			return HostFire{ScenarioID: f[1], Action: Action(f[2]), BytesDone: bytesDone, Index: idx}, rec, nil
+		case "beacon":
+			out.Kind = CtlBeacon
+			out.Text = strings.Join(f[1:], " ")
 		default:
-			log("control: %s", line)
+			out.Kind = CtlLog
+			out.Text = line
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return HostFire{}, rec, err
-	}
-	return HostFire{}, rec, errors.New("control channel closed before the guest reported a fire")
+	return out
 }
 
 // HostDispatch executes a host-site action.
