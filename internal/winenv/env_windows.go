@@ -1,0 +1,424 @@
+//go:build windows
+
+package winenv
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"unsafe"
+)
+
+// The real Win32 surface. Standard library only: no cgo, no external modules, so
+// `go build` produces one static exe with no runtime dependency, which spec §6C
+// requires. Every call goes through a lazily-resolved DLL so a missing export on
+// an old build of Windows is a runtime error we can report, not a load failure
+// that stops the program before it can say anything.
+
+var (
+	shell32  = syscall.NewLazyDLL("shell32.dll")
+	ole32    = syscall.NewLazyDLL("ole32.dll")
+	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	advapi32 = syscall.NewLazyDLL("advapi32.dll")
+
+	procSHGetKnownFolderPath = shell32.NewProc("SHGetKnownFolderPath")
+	procCoTaskMemFree        = ole32.NewProc("CoTaskMemFree")
+
+	procGetLogicalDriveStringsW        = kernel32.NewProc("GetLogicalDriveStringsW")
+	procGetVolumeNameForVolumeMountPtW = kernel32.NewProc("GetVolumeNameForVolumeMountPointW")
+	procGetVolumeInformationW          = kernel32.NewProc("GetVolumeInformationW")
+	procGetDiskFreeSpaceExW            = kernel32.NewProc("GetDiskFreeSpaceExW")
+	procGetDriveTypeW                  = kernel32.NewProc("GetDriveTypeW")
+	procGetWindowsDirectoryW           = kernel32.NewProc("GetWindowsDirectoryW")
+	procGetFileAttributesW             = kernel32.NewProc("GetFileAttributesW")
+
+	procRegOpenKeyExW    = advapi32.NewProc("RegOpenKeyExW")
+	procRegEnumKeyExW    = advapi32.NewProc("RegEnumKeyExW")
+	procRegQueryValueExW = advapi32.NewProc("RegQueryValueExW")
+	procRegCloseKey      = advapi32.NewProc("RegCloseKey")
+)
+
+const (
+	driveRemovable = 2
+
+	// FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS and FILE_ATTRIBUTE_OFFLINE mark a
+	// OneDrive Files On-Demand placeholder. SAFETY.md phase 1.
+	attrRecallOnDataAccess = 0x00400000
+	attrRecallOnOpen       = 0x00040000
+	attrOffline            = 0x00001000
+	attrReparsePoint       = 0x00000400
+	invalidFileAttributes  = 0xFFFFFFFF
+
+	hkeyLocalMachine = 0x80000002
+	hkeyCurrentUser  = 0x80000001
+
+	keyRead         = 0x20019
+	keyWow64_64Key  = 0x0100
+	keyWow64_32Key  = 0x0200
+	errNoMoreItems  = 259
+	regSZ           = 1
+	regExpandSZ     = 2
+	maxRegKeyNameCh = 256
+)
+
+// guid matches the Win32 GUID layout for SHGetKnownFolderPath.
+type guid struct {
+	Data1 uint32
+	Data2 uint16
+	Data3 uint16
+	Data4 [8]byte
+}
+
+// FOLDERID values. These constants are the reason this file exists: Documents is
+// redirected far more often than people expect, and a school laptop with folder
+// redirection to a file server is exactly the machine where string-concatenating
+// %USERPROFILE% silently copies an empty directory and reports success.
+var knownFolderIDs = []struct {
+	Name string
+	ID   guid
+}{
+	{"Desktop", guid{0xB4BFCC3A, 0xDB2C, 0x424C, [8]byte{0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41}}},
+	{"Documents", guid{0xFDD39AD0, 0x238F, 0x46AF, [8]byte{0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7}}},
+	{"Downloads", guid{0x374DE290, 0x123F, 0x4565, [8]byte{0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B}}},
+	{"Pictures", guid{0x33E28130, 0x4E1E, 0x4676, [8]byte{0x83, 0x5A, 0x98, 0x39, 0x5C, 0x3B, 0xC3, 0xBB}}},
+	{"Music", guid{0x4BD8D571, 0x6D19, 0x48D3, [8]byte{0xBE, 0x97, 0x42, 0x22, 0x20, 0x08, 0x0E, 0x43}}},
+	{"Videos", guid{0x18989B1D, 0x99B5, 0x455B, [8]byte{0x84, 0x1C, 0xAB, 0x7C, 0x74, 0xE4, 0xDD, 0xFC}}},
+	{"RoamingAppData", guid{0x3EB685DB, 0x65F9, 0x4CF6, [8]byte{0xA0, 0x3A, 0xE3, 0xEF, 0x65, 0x72, 0x9F, 0x3D}}},
+	{"LocalAppData", guid{0xF1B32785, 0x6FBA, 0x4FCF, [8]byte{0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91}}},
+}
+
+type winEnv struct{}
+
+// New returns the real Windows environment.
+func New() Env { return &winEnv{} }
+
+// Available reports whether the real Windows surface is present.
+func Available() bool { return true }
+
+func (w *winEnv) Platform() string { return "windows" }
+
+func (w *winEnv) KnownFolders() ([]Folder, error) {
+	out := make([]Folder, 0, len(knownFolderIDs))
+	for _, kf := range knownFolderIDs {
+		id := kf.ID
+		var ptr uintptr
+		r, _, _ := procSHGetKnownFolderPath.Call(
+			uintptr(unsafe.Pointer(&id)),
+			0, // no flags: do not create, do not verify
+			0, // current user token
+			uintptr(unsafe.Pointer(&ptr)),
+		)
+		if r != 0 || ptr == 0 {
+			out = append(out, Folder{ID: kf.Name, Present: false})
+			continue
+		}
+		p := utf16PtrToString((*uint16)(unsafe.Pointer(ptr)))
+		procCoTaskMemFree.Call(ptr)
+		st, err := os.Stat(p)
+		out = append(out, Folder{ID: kf.Name, Path: p, Present: err == nil && st.IsDir()})
+	}
+	return out, nil
+}
+
+// uninstallKeys covers both registry views. A 32-bit installer on a 64-bit
+// machine lands in the WOW6432Node view, and a tool that reads only one view
+// tells the user a shorter list than the truth — which under §4.2 is the failure
+// that costs a customer at month two.
+var uninstallKeys = []struct {
+	Root  uintptr
+	Path  string
+	Flags uintptr
+}{
+	{hkeyLocalMachine, `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`, keyWow64_64Key},
+	{hkeyLocalMachine, `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`, keyWow64_32Key},
+	{hkeyCurrentUser, `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`, 0},
+}
+
+func (w *winEnv) InstalledPrograms() ([]Program, error) {
+	seen := make(map[string]Program)
+	for _, k := range uninstallKeys {
+		h, err := regOpen(k.Root, k.Path, k.Flags)
+		if err != nil {
+			continue // a missing view is normal, not an error
+		}
+		for i := uint32(0); ; i++ {
+			name, err := regEnumKey(h, i)
+			if err != nil {
+				break
+			}
+			sub, err := regOpen(uintptr(h), name, k.Flags)
+			if err != nil {
+				continue
+			}
+			display := regString(sub, "DisplayName")
+			sysComp := regString(sub, "SystemComponent")
+			parent := regString(sub, "ParentKeyName")
+			// SystemComponent=1 and ParentKeyName mark updates and sub-entries.
+			// They are noise in a list the user is asked to read and accept.
+			if display != "" && sysComp != "1" && parent == "" {
+				prog := Program{
+					Name:      display,
+					Publisher: regString(sub, "Publisher"),
+					Version:   regString(sub, "DisplayVersion"),
+					Source:    k.Path + `\` + name,
+				}
+				if _, dup := seen[prog.Name]; !dup {
+					seen[prog.Name] = prog
+				}
+			}
+			regClose(sub)
+		}
+		regClose(h)
+	}
+	out := make([]Program, 0, len(seen))
+	for _, p := range seen {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (w *winEnv) Volumes() ([]Volume, error) {
+	buf := make([]uint16, 1024)
+	n, _, err := procGetLogicalDriveStringsW.Call(uintptr(len(buf)), uintptr(unsafe.Pointer(&buf[0])))
+	if n == 0 {
+		return nil, fmt.Errorf("winenv: GetLogicalDriveStrings: %v", err)
+	}
+	sysVol, sysErr := w.SystemVolume()
+	var out []Volume
+	for _, root := range splitUTF16List(buf[:n]) {
+		v, err := volumeAt(root)
+		if err != nil {
+			continue // a card reader with no card is not an error
+		}
+		if sysErr == nil && v.GUID != "" && v.GUID == sysVol.GUID {
+			v.IsSystem = true
+		}
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Mount < out[j].Mount })
+	return out, nil
+}
+
+func volumeAt(root string) (Volume, error) {
+	rp, err := syscall.UTF16PtrFromString(root)
+	if err != nil {
+		return Volume{}, err
+	}
+	v := Volume{Mount: root}
+
+	nameBuf := make([]uint16, 64)
+	if r, _, _ := procGetVolumeNameForVolumeMountPtW.Call(
+		uintptr(unsafe.Pointer(rp)), uintptr(unsafe.Pointer(&nameBuf[0])), uintptr(len(nameBuf)),
+	); r != 0 {
+		v.GUID = utf16ToString(nameBuf)
+	}
+
+	label := make([]uint16, 261)
+	fsName := make([]uint16, 261)
+	procGetVolumeInformationW.Call(
+		uintptr(unsafe.Pointer(rp)),
+		uintptr(unsafe.Pointer(&label[0])), uintptr(len(label)),
+		0, 0, 0,
+		uintptr(unsafe.Pointer(&fsName[0])), uintptr(len(fsName)),
+	)
+	v.Label = utf16ToString(label)
+	v.FS = utf16ToString(fsName)
+
+	var freeForCaller, total, totalFree uint64
+	procGetDiskFreeSpaceExW.Call(
+		uintptr(unsafe.Pointer(rp)),
+		uintptr(unsafe.Pointer(&freeForCaller)),
+		uintptr(unsafe.Pointer(&total)),
+		uintptr(unsafe.Pointer(&totalFree)),
+	)
+	// freeForCaller, not totalFree: a disk quota makes them differ, and the
+	// number that decides whether the copy fits is the one we are allowed to use.
+	v.FreeBytes, v.TotalBytes = freeForCaller, total
+
+	dt, _, _ := procGetDriveTypeW.Call(uintptr(unsafe.Pointer(rp)))
+	v.Removable = dt == driveRemovable
+
+	if v.GUID == "" {
+		return v, fmt.Errorf("winenv: no volume GUID for %s", root)
+	}
+	return v, nil
+}
+
+func (w *winEnv) SystemVolume() (Volume, error) {
+	buf := make([]uint16, 512)
+	n, _, err := procGetWindowsDirectoryW.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if n == 0 {
+		return Volume{}, fmt.Errorf("winenv: GetWindowsDirectory: %v", err)
+	}
+	winDir := utf16ToString(buf[:n])
+	root := filepath.VolumeName(winDir) + `\`
+	v, verr := volumeAt(root)
+	v.IsSystem = true
+	return v, verr
+}
+
+func (w *winEnv) Firmware() (Firmware, error) {
+	// Deliberately incomplete and deliberately honest.
+	//
+	// Secure Boot state, third-party UEFI CA trust, the TPM version and whether
+	// this firmware honours BootNext cannot be established from the stdlib alone,
+	// and every one of them is a fact we tell the user BEFORE they start. A
+	// guess here becomes a promise the tool cannot keep, so this returns
+	// Known=false until the detection is written and validated in a VM.
+	return Firmware{
+		Known: false,
+		Notes: []string{
+			"Firmware detection is not implemented yet. Secure Boot, third-party UEFI CA trust, TPM version and BootNext support are UNKNOWN.",
+			"SAFETY.md requires all three to be detected in phase 1 and stated before the run begins.",
+		},
+	}, nil
+}
+
+func (w *winEnv) CloudPlaceholders(root string) (PlaceholderStats, error) {
+	var st PlaceholderStats
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // unreadable subtrees are the copy engine's problem, not this one's
+		}
+		if info.IsDir() {
+			return nil
+		}
+		attrs, aerr := fileAttributes(p)
+		if aerr != nil {
+			return nil
+		}
+		if attrs&(attrRecallOnDataAccess|attrRecallOnOpen|attrOffline) != 0 {
+			st.Count++
+			st.LogicalSize += info.Size()
+		}
+		return nil
+	})
+	return st, err
+}
+
+func fileAttributes(p string) (uint32, error) {
+	pp, err := syscall.UTF16PtrFromString(longPath(p))
+	if err != nil {
+		return 0, err
+	}
+	r, _, e := procGetFileAttributesW.Call(uintptr(unsafe.Pointer(pp)))
+	if uint32(r) == invalidFileAttributes {
+		return 0, e
+	}
+	return uint32(r), nil
+}
+
+// longPath adds the \\?\ prefix so paths over MAX_PATH work. Deep redirected
+// Documents trees on school machines routinely exceed 260 characters.
+func longPath(p string) string {
+	if strings.HasPrefix(p, `\\?\`) || !filepath.IsAbs(p) {
+		return p
+	}
+	if strings.HasPrefix(p, `\\`) {
+		return `\\?\UNC\` + strings.TrimPrefix(p, `\\`)
+	}
+	return `\\?\` + p
+}
+
+// --- registry helpers (stdlib syscall only) ---
+
+func regOpen(root uintptr, path string, flags uintptr) (syscall.Handle, error) {
+	pp, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, err
+	}
+	var h syscall.Handle
+	r, _, _ := procRegOpenKeyExW.Call(
+		root, uintptr(unsafe.Pointer(pp)), 0, keyRead|flags, uintptr(unsafe.Pointer(&h)),
+	)
+	if r != 0 {
+		return 0, fmt.Errorf("winenv: RegOpenKeyEx(%s): %d", path, r)
+	}
+	return h, nil
+}
+
+func regClose(h syscall.Handle) {
+	if h != 0 {
+		procRegCloseKey.Call(uintptr(h))
+	}
+}
+
+func regEnumKey(h syscall.Handle, i uint32) (string, error) {
+	buf := make([]uint16, maxRegKeyNameCh+1)
+	n := uint32(len(buf))
+	r, _, _ := procRegEnumKeyExW.Call(
+		uintptr(h), uintptr(i), uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&n)),
+		0, 0, 0, 0,
+	)
+	if r != 0 {
+		return "", fmt.Errorf("winenv: RegEnumKeyEx: %d", r)
+	}
+	return utf16ToString(buf[:n]), nil
+}
+
+func regString(h syscall.Handle, name string) string {
+	np, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return ""
+	}
+	var typ uint32
+	var size uint32
+	r, _, _ := procRegQueryValueExW.Call(
+		uintptr(h), uintptr(unsafe.Pointer(np)), 0,
+		uintptr(unsafe.Pointer(&typ)), 0, uintptr(unsafe.Pointer(&size)),
+	)
+	if r != 0 || size == 0 || (typ != regSZ && typ != regExpandSZ) {
+		return ""
+	}
+	buf := make([]uint16, size/2+1)
+	r, _, _ = procRegQueryValueExW.Call(
+		uintptr(h), uintptr(unsafe.Pointer(np)), 0,
+		uintptr(unsafe.Pointer(&typ)), uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size)),
+	)
+	if r != 0 {
+		return ""
+	}
+	return utf16ToString(buf)
+}
+
+// --- UTF-16 helpers ---
+
+func utf16ToString(s []uint16) string {
+	for i, c := range s {
+		if c == 0 {
+			return syscall.UTF16ToString(s[:i])
+		}
+	}
+	return syscall.UTF16ToString(s)
+}
+
+func utf16PtrToString(p *uint16) string {
+	if p == nil {
+		return ""
+	}
+	var n int
+	for ptr := unsafe.Pointer(p); *(*uint16)(ptr) != 0; n++ {
+		ptr = unsafe.Add(ptr, unsafe.Sizeof(uint16(0)))
+	}
+	return syscall.UTF16ToString(unsafe.Slice(p, n))
+}
+
+// splitUTF16List splits a NUL-separated, double-NUL-terminated UTF-16 list.
+func splitUTF16List(b []uint16) []string {
+	var out []string
+	start := 0
+	for i, c := range b {
+		if c != 0 {
+			continue
+		}
+		if i > start {
+			out = append(out, syscall.UTF16ToString(b[start:i]))
+		}
+		start = i + 1
+	}
+	return out
+}
