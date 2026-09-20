@@ -248,7 +248,11 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 			}
 			if errors.Is(cerr, context.Canceled) || errors.Is(cerr, context.DeadlineExceeded) {
 				res.Cancelled = true
-				quarantineRemaining(q, files[i+1:], quarantine.ReasonCancelled, "the run was cancelled before this file was copied")
+				// files[i:], not files[i+1:]: the file that was in flight when
+				// the cancellation arrived was not copied either, and a file
+				// that is neither copied nor quarantined is a file that went
+				// missing silently.
+				quarantineRemaining(q, files[i:], quarantine.ReasonCancelled, "the run was cancelled while this file was being copied")
 				break
 			}
 			report(o, res, q, f.Rel)
