@@ -24,12 +24,22 @@ import (
 //
 // Three things enforce "a run cannot contaminate the next", and all three are needed:
 //
-//  1. The base file is chmod 0444 and its SHA-256 is verified BEFORE AND AFTER every single run. If it
-//     ever changes, the suite stops — every result recorded after the change would be measured against
-//     a different operating system than the ones before it.
+//  1. BOTH base files — the Windows system image and the empty-NTFS destination image — are verified
+//     BEFORE AND AFTER every single run, by SHA-256 and by file mode. If either ever changes, the suite
+//     stops. It is both images because a run that starts with a destination holding the previous run's
+//     archive is the same failure as one that starts with the previous run's Windows, and for eighty
+//     runs it would look identical to a pass. See AssertBaseUnchanged.
 //  2. The overlay is created fresh per run and deleted per run. Not truncated, not reused.
-//  3. QEMU opens the backing file read-only by default; we pass it explicitly anyway, because a default
-//     is a thing that changes in a release note.
+//  3. The base files carry no write bit for anyone (chmod 0444), and that is CHECKED rather than
+//     assumed — the mode is re-read before and after every run alongside the hash. A hash says the file
+//     has not changed yet; a mode with no write bit says the ordinary ways of changing it do not work.
+//
+// What is deliberately NOT claimed here: this file does not pass a backing-file read-only option to
+// QEMU. An earlier version of this comment said it did, and the argv below never contained one — which
+// is worse than the gap it described, because a reader who checks the three pillars finds two. QEMU
+// opens a qcow2 backing file read-only unless it is told otherwise and nothing here tells it otherwise,
+// but that is an upstream default, so the guarantee this harness actually stands behind is pillar 1:
+// the hash and the mode, measured, on both images, on every run.
 //
 // This is why 100 consecutive runs means something. Without it, run 74 is being tested against whatever
 // runs 1..73 left behind, and the number 100 is decoration.
@@ -141,8 +151,13 @@ type VM struct {
 	cmd  *exec.Cmd
 	qmp  *QMP
 
+	// stderr is QEMU's own diagnostics, kept open for the life of the VM and closed by Close. Without
+	// it, a QEMU that refuses to start says so into a file nobody holds and the run reports only "the
+	// guest never opened the control channel".
+	stderr *os.File
+
 	ctlListener net.Listener
-	ctlConn      net.Conn
+	ctlConn     net.Conn
 }
 
 // Start boots the VM and returns once QMP is answering.
@@ -211,8 +226,10 @@ func (v *VM) Start(spec VMSpec) error {
 		return err
 	}
 	cmd.Stderr = stderr
+	v.stderr = stderr
 	if err := cmd.Start(); err != nil {
 		ln.Close()
+		stderr.Close()
 		return fmt.Errorf("starting %s: %w", spec.QemuBinary, err)
 	}
 	v.cmd = cmd
@@ -322,8 +339,14 @@ func (v *VM) Close() {
 		v.qmp = nil
 	}
 	if v.cmd != nil && v.cmd.Process != nil {
+		// Kill only. Wait() is owned by VM.Wait's goroutine, and calling Process.Wait() here as well
+		// would be two reapers racing for one child — which shows up as a flaky "wait: no child
+		// processes" once every few dozen runs and costs an afternoon to find.
 		_ = v.cmd.Process.Kill()
-		_, _ = v.cmd.Process.Wait()
+	}
+	if v.stderr != nil {
+		v.stderr.Close()
+		v.stderr = nil
 	}
 	_ = os.Remove(v.spec.QMPSock)
 	_ = os.Remove(v.spec.ControlSock)
@@ -359,12 +382,29 @@ func FileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// AssertBaseUnchanged is called before and after every run.
+// AssertBaseUnchanged is called on BOTH base images before and after every run.
 //
 // "Before" catches an edited base. "After" catches a run that somehow wrote through its overlay — which
 // should be impossible, which is exactly why it is worth checking: the impossible things are the ones
 // nobody notices for eighty runs.
+//
+// It checks the mode as well as the hash. The hash is the stronger statement about the past; the mode
+// is the statement about the next five minutes, and an operator who has just made a base image writable
+// in order to "quickly fix something" is the case the hash catches one run too late.
 func AssertBaseUnchanged(path, expect string) error {
+	if expect == "" {
+		return fmt.Errorf("no expected SHA-256 recorded for %s: a base image the config cannot identify "+
+			"cannot be proven not to have moved, and 'unverified' is not 'unchanged'", path)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if mode := st.Mode().Perm(); mode&0o222 != 0 {
+		return fmt.Errorf("THE BASE IMAGE IS WRITABLE: %s is mode %04o. README §3 step 7 requires 0444 "+
+			"on both base images; a writable base is one command away from making every result in this "+
+			"suite a measurement of a different machine. chmod 0444 it and re-run", path, mode)
+	}
 	got, err := FileSHA256(path)
 	if err != nil {
 		return err
@@ -372,6 +412,23 @@ func AssertBaseUnchanged(path, expect string) error {
 	if got != expect {
 		return fmt.Errorf("THE BASE IMAGE CHANGED: %s is now %s, expected %s. Every result in this suite "+
 			"is measured against a different machine than the one it claims. Stop", path, got, expect)
+	}
+	return nil
+}
+
+// AssertBasesUnchanged checks both images and names which one moved.
+//
+// There is no variant that checks only the system image. The destination base used to be hashed once
+// per suite, in doctor, before run 1 — so "every run starts with a genuinely empty destination" was
+// true of run 1 and unverified for the other 119. A contaminated destination base is the same class of
+// failure as a contaminated system base and is harder to see, because a destination that already holds
+// the previous run's archive makes a broken copy look complete.
+func AssertBasesUnchanged(cfg *Config) error {
+	if err := AssertBaseUnchanged(cfg.Base.SystemImage, cfg.Base.SystemSHA256); err != nil {
+		return fmt.Errorf("system base: %w", err)
+	}
+	if err := AssertBaseUnchanged(cfg.Base.DestImage, cfg.Base.DestSHA256); err != nil {
+		return fmt.Errorf("destination base: %w", err)
 	}
 	return nil
 }

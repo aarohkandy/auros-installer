@@ -64,6 +64,19 @@ func (d Disagreement) String() string {
 	return s
 }
 
+// disagree builds a Disagreement. Every failure site in this file goes through
+// it, so the shape of a disagreement is defined once and a new failure mode
+// cannot quietly omit the field that tells the user what was expected.
+func disagree(e manifest.Entry, kind Kind, want, got string) *Disagreement {
+	return &Disagreement{
+		Path:   e.Path,
+		Stored: e.Stored,
+		Kind:   kind,
+		Want:   want,
+		Got:    got,
+	}
+}
+
 // Report is the full result. A Report is produced whether verification passed or
 // failed; Clean is what distinguishes them.
 type Report struct {
@@ -211,8 +224,8 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	}
 	sort.Strings(extras)
 	for _, stored := range extras {
-		d := Disagreement{Path: stored, Stored: stored, Kind: KindExtra,
-			Want: "not present", Got: "present at destination"}
+		extra := manifest.Entry{Path: stored, Stored: stored}
+		d := *disagree(extra, KindExtra, "not present", "present at destination")
 		rep.Disagreements = append(rep.Disagreements, d)
 		recordQuarantine(o.Quarantine, d)
 	}
@@ -261,8 +274,7 @@ func checkOne(ctx context.Context, full string, e manifest.Entry, h hash.Hash, b
 	attempts := retries + 1
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return &Disagreement{Path: e.Path, Stored: e.Stored, Kind: KindUnreadable,
-				Want: e.SHA256, Got: "cancelled"}, attempt > 0, bytesRead
+			return disagree(e, KindUnreadable, e.SHA256, "cancelled"), attempt > 0, bytesRead
 		}
 		d, n := checkOnce(ctx, full, e, h, buf)
 		bytesRead += n
@@ -278,29 +290,23 @@ func checkOnce(ctx context.Context, full string, e manifest.Entry, h hash.Hash, 
 	st, err := os.Lstat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &Disagreement{Path: e.Path, Stored: e.Stored, Kind: KindMissing,
-				Want: fmt.Sprintf("%d bytes, %s", e.Size, e.SHA256), Got: "no such file"}, 0
+			return disagree(e, KindMissing, fmt.Sprintf("%d bytes, %s", e.Size, e.SHA256), "no such file"), 0
 		}
-		return &Disagreement{Path: e.Path, Stored: e.Stored, Kind: KindUnreadable,
-			Want: e.SHA256, Got: err.Error()}, 0
+		return disagree(e, KindUnreadable, e.SHA256, err.Error()), 0
 	}
 	if !st.Mode().IsRegular() {
-		return &Disagreement{Path: e.Path, Stored: e.Stored, Kind: KindNotRegular,
-			Want: "regular file", Got: st.Mode().String()}, 0
+		return disagree(e, KindNotRegular, "regular file", st.Mode().String()), 0
 	}
 	if st.Size() != e.Size {
-		return &Disagreement{Path: e.Path, Stored: e.Stored, Kind: KindSize,
-			Want: fmt.Sprintf("%d bytes", e.Size), Got: fmt.Sprintf("%d bytes", st.Size())}, 0
+		return disagree(e, KindSize, fmt.Sprintf("%d bytes", e.Size), fmt.Sprintf("%d bytes", st.Size())), 0
 	}
 	h.Reset()
 	sum, n, err := manifest.HashFile(ctx, full, h, buf)
 	if err != nil {
-		return &Disagreement{Path: e.Path, Stored: e.Stored, Kind: KindUnreadable,
-			Want: e.SHA256, Got: err.Error()}, n
+		return disagree(e, KindUnreadable, e.SHA256, err.Error()), n
 	}
 	if sum != e.SHA256 {
-		return &Disagreement{Path: e.Path, Stored: e.Stored, Kind: KindHash,
-			Want: e.SHA256, Got: sum}, n
+		return disagree(e, KindHash, e.SHA256, sum), n
 	}
 	return nil, n
 }

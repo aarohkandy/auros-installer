@@ -600,3 +600,29 @@ func assertNoPartials(t *testing.T, dest string) {
 		t.Fatalf("walking the destination: %v", err)
 	}
 }
+
+func TestCopy_CancelledBeforeTheFirstFileDoesNotDestroyAnEarlierManifest(t *testing.T) {
+	// A run that is cancelled before it copies anything has an empty manifest.
+	// Writing that over the manifest an earlier interrupted run left behind
+	// would throw away the only record of what is already on the destination.
+	e := newEnv(t, sample())
+	first, err := Run(context.Background(), e.opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := testsupport.MustRead(t, first.ManifestPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	e2 := *e
+	e2.q = quarantine.NewSet(nil)
+	if _, err := Run(ctx, e2.opts()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+
+	after := testsupport.MustRead(t, first.ManifestPath)
+	if after != before {
+		t.Fatalf("a cancelled run overwrote the earlier manifest\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	e.assertSystemDiskUntouched(t)
+}

@@ -34,6 +34,12 @@ func main() {
 		instManifest = flag.String("installer-manifest", "", "the installer's own manifest on the destination")
 		scenarioID  = flag.String("scenario", "", "F01..F20, or empty for a clean run")
 		control     = flag.String("control", `\\.\COM2`, "serial line to the runner")
+		checkOnly   = flag.Bool("check-token-only", false,
+			"perform the §4.7 volume-serial check and exit. This is the mode CLEAN runs use: they induce "+
+				"nothing, so they have no fault agent to run, and without this they would be the 100 runs "+
+				"of 120 in which the guard was never exercised.")
+		maxOvershoot = flag.Int64("max-overshoot-bytes", fault.DefaultMaxOvershootBytes,
+			"a fire further past its pin than this is not a fire at that pin")
 		out         = flag.String("out", "", "also write the FireRecord JSON here")
 		timeoutSec  = flag.Int("timeout-sec", 5400, "give up waiting for the trigger after this long")
 		pollMS      = flag.Int("poll-ms", 5, "progress poll interval")
@@ -51,6 +57,13 @@ func main() {
 	if _, err := fault.AssertScratch(*tokenPath, *corpusRoot, *destVolume); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
+	}
+	if *checkOnly {
+		// Exit 0 and say so. The run script runs this SYNCHRONOUSLY before the installer and halts the
+		// run on a non-zero exit, so the guard is enforced on all 120 runs rather than on the 20 that
+		// happen to induce a fault. Nothing is opened, nothing is watched, nothing is held.
+		fmt.Printf("harness token vouches for %s (dest %s)\n", *corpusRoot, *destVolume)
+		return
 	}
 
 	ctl, err := os.OpenFile(*control, os.O_RDWR, 0)
@@ -139,7 +152,7 @@ func main() {
 	if execErr != nil {
 		die("scenario %s: %v", sc.ID, execErr)
 	}
-	if err := rec.Valid(); err != nil {
+	if err := rec.Valid(sc, *maxOvershoot); err != nil {
 		// Exit 4 is "the fault did not fire". The runner treats it as a FAILED run, not a skipped one:
 		// a scenario that did not happen is not a scenario that passed.
 		fmt.Fprintln(os.Stderr, err)

@@ -14,8 +14,11 @@ func entry(path, content string) Entry {
 	sum := sha256.Sum256([]byte(content))
 	digest := fmt.Sprintf("%x", sum)
 	return Entry{
-		Path: path, Stored: path, Size: int64(len(content)),
-		ModTimeUnixNano: 1700000000000000000, SHA256: digest,
+		Path:            path,
+		Stored:          path,
+		Size:            int64(len(content)),
+		ModTimeUnixNano: 1700000000000000000,
+		SHA256:          digest,
 	}
 }
 

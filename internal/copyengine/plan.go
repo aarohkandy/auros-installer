@@ -90,8 +90,10 @@ func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) 
 			}
 			if err != nil {
 				q.Add(quarantine.Record{
-					Path:   displayPath(rootAbs, label, p), Reason: quarantine.ReasonReadError,
-					Detail: err.Error(), Attempts: 1,
+					Path:     displayPath(rootAbs, label, p),
+					Reason:   quarantine.ReasonReadError,
+					Detail:   err.Error(),
+					Attempts: 1,
 				})
 				if d != nil && d.IsDir() {
 					return fs.SkipDir
@@ -121,8 +123,10 @@ func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) 
 			}
 			if !d.Type().IsRegular() {
 				q.Add(quarantine.Record{
-					Path:   logical, Reason: quarantine.ReasonUnsupportedType,
-					Detail: "mode " + d.Type().String(), Attempts: 1,
+					Path:     logical,
+					Reason:   quarantine.ReasonUnsupportedType,
+					Detail:   "mode " + d.Type().String(),
+					Attempts: 1,
 				})
 				return nil
 			}
@@ -137,7 +141,8 @@ func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) 
 			}
 			if o.MaxFileBytes > 0 && info.Size() > o.MaxFileBytes {
 				q.Add(quarantine.Record{
-					Path:     logical, Reason: quarantine.ReasonTooLarge,
+					Path:     logical,
+					Reason:   quarantine.ReasonTooLarge,
 					Detail:   fmt.Sprintf("%d bytes exceeds the %d byte limit", info.Size(), o.MaxFileBytes),
 					Attempts: 1,
 				})
@@ -147,8 +152,10 @@ func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) 
 			cleanRel, cerr := manifest.CleanRel(logical)
 			if cerr != nil {
 				q.Add(quarantine.Record{
-					Path:   logical, Reason: quarantine.ReasonPathEscape,
-					Detail: cerr.Error(), Attempts: 1,
+					Path:     logical,
+					Reason:   quarantine.ReasonPathEscape,
+					Detail:   cerr.Error(),
+					Attempts: 1,
 				})
 				return nil
 			}
@@ -157,16 +164,21 @@ func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) 
 			if taken[manifest.FoldKey(stored)] {
 				// DeCollide exhausted its suffixes. Never silently overwrite.
 				q.Add(quarantine.Record{
-					Path:   cleanRel, Reason: quarantine.ReasonNameCollision,
-					Detail: "could not find an unused destination name", Attempts: 1,
+					Path:     cleanRel,
+					Reason:   quarantine.ReasonNameCollision,
+					Detail:   "could not find an unused destination name",
+					Attempts: 1,
 				})
 				return nil
 			}
 			taken[manifest.FoldKey(stored)] = true
 
 			out = append(out, planned{
-				Src:  p, Rel: cleanRel, Stored: stored,
-				Size: info.Size(), ModTime: info.ModTime().UnixNano(),
+				Src:     p,
+				Rel:     cleanRel,
+				Stored:  stored,
+				Size:    info.Size(),
+				ModTime: info.ModTime().UnixNano(),
 			})
 			return nil
 		})

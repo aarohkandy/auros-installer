@@ -97,12 +97,17 @@ func needsEscape(b byte) bool {
 // reservedStems are Windows device names. A file called "CON" or "aux.txt" cannot
 // be created on a Windows-formatted destination volume even though it is a
 // perfectly ordinary name on the ext4 side.
-var reservedStems = map[string]bool{
-	"CON": true, "PRN": true, "AUX": true, "NUL": true,
-	"COM0": true, "COM1": true, "COM2": true, "COM3": true, "COM4": true,
-	"COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
-	"LPT0": true, "LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true,
-	"LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+var reservedStems = newStemSet(
+	"CON PRN AUX NUL " +
+		"COM0 COM1 COM2 COM3 COM4 COM5 COM6 COM7 COM8 COM9 " +
+		"LPT0 LPT1 LPT2 LPT3 LPT4 LPT5 LPT6 LPT7 LPT8 LPT9")
+
+func newStemSet(names string) map[string]bool {
+	m := make(map[string]bool)
+	for _, n := range strings.Fields(names) {
+		m[n] = true
+	}
+	return m
 }
 
 // Sanitize converts a cleaned relative source path into a path that can be

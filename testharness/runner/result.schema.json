@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aarohkandy/auros-installer/testharness/runner/result.schema.json",
+  "title": "Auros migration harness — one run",
+  "description": "Emitted once per run into <artifact_dir>/<suite_id>/<run_id>/result.json. `runner report` reads these and RECOMPUTES every verdict from the checks array; the stored `verdict` field is ignored, because a field that says 'pass' is exactly what a broken or malicious harness would write. Fails closed: a result that does not validate against this schema is counted as a FAILED run, never as an unknown or a skipped one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "harness", "suite_id", "run_id", "kind", "ordinal", "host_profile",
+    "base_system_sha256", "base_dest_sha256", "corpus_digest", "corpus_profile",
+    "corpus_seed", "corpus_files", "started_at", "finished_at", "duration_ms",
+    "installer", "corpus_verify", "boot_check", "checks", "artifacts", "verdict"
+  ],
+  "properties": {
+    "harness": { "type": "string" },
+    "suite_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "kind": { "enum": ["clean", "fault"] },
+    "ordinal": { "type": "integer", "minimum": 1 },
+    "scenario_id": { "type": "string", "pattern": "^F[0-9]{2}$" },
+
+    "host_profile": {
+      "type": "string",
+      "description": "parallel=N reclaim_between_runs=B. Recorded because BLOCKED.md B1 is unresolved and the suite may legitimately have run serialized on a small host. The evidence is the same either way; which path produced it is not a detail worth losing."
+    },
+
+    "base_system_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "The immutable Windows base image this run overlaid. Verified before AND after the run. If it ever differs between two results in a suite, the suite is not 100 runs of the same test."
+    },
+    "base_dest_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+
+    "corpus_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 of golden-manifest.jsonl. Same seed produces the same corpus produces the same digest; this is the string that makes 'run 63 lost a file' reproducible."
+    },
+    "corpus_profile": {
+      "enum": ["realistic", "compact"],
+      "description": "compact keeps all 18,000 files and every structural case but shrinks the long tail for a disk-constrained host. A suite run on compact is NOT the §6C exit condition and REPORT.md says so on its face."
+    },
+    "corpus_seed": { "type": "integer", "minimum": 0 },
+    "corpus_files": { "type": "integer", "minimum": 1 },
+
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+
+    "pin": {
+      "type": ["object", "null"],
+      "description": "Where the fault was scheduled to fire, resolved from the golden manifest by integer arithmetic before the VM started. Present on fault runs.",
+      "required": ["phase", "bp", "file_index", "byte_offset_in_file", "cumulative_bytes", "total_bytes"],
+      "properties": {
+        "phase": { "enum": ["COPY", "VERIFY"] },
+        "bp": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "file_index": { "type": "integer", "minimum": 0 },
+        "path": { "type": "string" },
+        "win_path": { "type": "string" },
+        "byte_offset_in_file": { "type": "integer", "minimum": 0 },
+        "cumulative_bytes": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "fire": {
+      "type": ["object", "null"],
+      "description": "What actually happened at the pin. `fired: false` means the induced failure never occurred, which makes the run NOT EVIDENCE — a green abort suite in which nothing was ever induced is the most likely way this harness rots, and check P0 exists to catch exactly that.",
+      "required": ["scenario_id", "fired"],
+      "properties": {
+        "scenario_id": { "type": "string" },
+        "fired": { "type": "boolean" },
+        "pin": { "type": "object" },
+        "observed_bytes_done": { "type": "integer" },
+        "observed_bytes_total": { "type": "integer" },
+        "observed_index": { "type": "integer" },
+        "observed_phase": { "type": "string" },
+        "overshoot_bytes": {
+          "type": "integer",
+          "description": "Observed minus pinned. Large means the installer reports progress too coarsely and the pin is nominal rather than real; it is published per run so a reader can judge that instead of trusting it."
+        },
+        "target_path": { "type": "string" },
+        "action_error": { "type": "string" },
+        "not_fired_reason": { "type": "string" },
+        "order_violations": {
+          "type": "integer",
+          "description": "Progress lines whose file index repeated or went backwards. Non-zero means the installer is not copying in manifest order, which makes every pin in the suite meaningless."
+        }
+      }
+    },
+
+    "installer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exit_code", "exit_reported", "killed_by_harness"],
+      "properties": {
+        "exit_code": { "type": "integer" },
+        "exit_reported": {
+          "type": "boolean",
+          "description": "False after a power cut, where no exit code exists and never will. A zero exit_code with exit_reported false must never be read as success."
+        },
+        "killed_by_harness": { "type": "boolean" },
+        "phase_reached": { "type": "string" }
+      }
+    },
+
+    "corpus_verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_files", "present_files", "hash_matches", "clean", "reported"],
+      "description": "Every source file re-hashed against the golden manifest AFTER the run — clean or aborted, no exceptions. This is 'zero data loss' as a measurement.",
+      "properties": {
+        "expected_files": { "type": "integer" },
+        "present_files": { "type": "integer" },
+        "hash_matches": { "type": "integer" },
+        "missing": { "type": "array", "items": { "type": "string" } },
+        "corrupt": { "type": "array", "items": { "type": "string" } },
+        "size_mismatch": { "type": "array", "items": { "type": "string" } },
+        "unreadable": { "type": "array", "items": { "type": "string" } },
+        "allowed_deviations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Files a fault scenario damaged ON PURPOSE (F09/F10/F11/F12). Named explicitly so that 'zero data loss' never quietly means 'zero apart from the ones we caused and did not mention' — and so that losing TWO files in a run that should have lost one is visible."
+        },
+        "clean": { "type": "boolean" },
+        "reported": {
+          "type": "boolean",
+          "description": "False means the guest never finished re-hashing. That is a failed run: an unmeasured corpus is not a verified one."
+        }
+      }
+    },
+
+    "boot_check": {
+      "type": "object",
+      "description": "REQUIRED. Spec §6C: Windows still boots normally after every abort. This is the slowest check in the suite and the one whose absence nobody notices, so it is a required property with no skip state. `performed: false` is a FAIL.",
+      "additionalProperties": false,
+      "required": ["performed", "beacon_seen", "seconds_to_beacon", "timeout_seconds", "system_state_sha256_before", "system_state_sha256_after", "system_state_equal", "verdict"],
+      "properties": {
+        "performed": { "type": "boolean" },
+        "beacon_seen": {
+          "type": "boolean",
+          "description": "The guest reached a usable session and said so. Its ABSENCE within the timeout is a failure, never an inconclusive."
+        },
+        "seconds_to_beacon": { "type": "number" },
+        "timeout_seconds": { "type": "integer" },
+        "report": { "type": ["object", "null"] },
+        "system_state_sha256_before": { "type": "string" },
+        "system_state_sha256_after": { "type": "string" },
+        "system_state_equal": {
+          "type": "boolean",
+          "description": "The first 1 MiB of PhysicalDrive0, the full BCD enumeration and the firmware boot entry, hashed. SAFETY.md phase 6 is the only code permitted to change any of it, and on an aborted run phase 6 never ran. This is 'the wall was not crossed' as a measurement rather than as the installer's own opinion."
+        },
+        "screenshot_path": { "type": "string" },
+        "serial_log_path": { "type": "string" },
+        "failures": { "type": "array", "items": { "type": "string" } },
+        "verdict": { "enum": ["pass", "fail"] }
+      }
+    },
+
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "description": "P0..P7. There is no 'skip' status: a check that did not run is a check that failed. Half the ways a test suite stops testing anything begin with a skip that looked reasonable.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "status"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^(P[0-9]+|SCHEMA)$" },
+          "name": { "type": "string" },
+          "status": { "enum": ["pass", "fail"] },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "description": "Every file the run produced, with its size and SHA-256, so REPORT.md can cite a digest per run instead of a sentence saying the run happened.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "path", "sha256", "bytes"],
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "bytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+
+    "verdict": {
+      "enum": ["pass", "fail"],
+      "description": "Written for humans. IGNORED by `runner report`, which recomputes it from the checks array."
+    },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

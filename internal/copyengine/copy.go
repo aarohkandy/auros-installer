@@ -200,7 +200,7 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	files, err := plan(ctx, o, q)
 	if err != nil {
 		res.Quarantined = q.Len()
-		_ = writeManifest(res.Manifest, res.ManifestPath)
+		_ = saveManifest(res.Manifest, res.ManifestPath)
 		return res, err
 	}
 	res.Planned = len(files)
@@ -208,7 +208,9 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		res.BytesPlanned += f.Size
 	}
 	logEvent(o.Log, "plan", runlog.Fields{
-		"files": res.Planned, "bytes": res.BytesPlanned, "quarantined_during_plan": q.Len(),
+		"files":                   res.Planned,
+		"bytes":                   res.BytesPlanned,
+		"quarantined_during_plan": q.Len(),
 	})
 
 	buf := make([]byte, o.bufSize())
@@ -263,8 +265,11 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 			// have made this impossible; if it happens anyway, quarantine rather
 			// than overwrite.
 			q.Add(quarantine.Record{
-				Path:   f.Rel, Stored: f.Stored, Reason: quarantine.ReasonNameCollision,
-				Detail: aerr.Error(), Attempts: 1,
+				Path:     f.Rel,
+				Stored:   f.Stored,
+				Reason:   quarantine.ReasonNameCollision,
+				Detail:   aerr.Error(),
+				Attempts: 1,
 			})
 			report(o, res, q, f.Rel)
 			continue
@@ -280,16 +285,21 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	// The manifest is written whatever happened, including on cancellation and
 	// on a full disk. That is what makes the destination knowable: it always
 	// describes exactly the set of files that are complete.
-	if werr := writeManifest(res.Manifest, res.ManifestPath); werr != nil {
+	if werr := saveManifest(res.Manifest, res.ManifestPath); werr != nil {
 		return res, fmt.Errorf("copyengine: writing manifest: %w", werr)
 	}
 	if werr := writeQuarantineReport(q, filepath.Join(metaPath, "quarantine.txt")); werr != nil {
 		logEvent(o.Log, "warn", runlog.Fields{"stage": "quarantine-report", "error": werr.Error()})
 	}
 	logEvent(o.Log, "complete", runlog.Fields{
-		"copied": res.Copied, "resumed": res.Resumed, "quarantined": res.Quarantined,
-		"bytes": res.BytesCopied, "destination_full": res.DestinationFull, "cancelled": res.Cancelled,
-		"manifest_digest": res.Manifest.Digest(), "system_disk_untouched": true,
+		"bytes":                 res.BytesCopied,
+		"cancelled":             res.Cancelled,
+		"copied":                res.Copied,
+		"destination_full":      res.DestinationFull,
+		"manifest_digest":       res.Manifest.Digest(),
+		"quarantined":           res.Quarantined,
+		"resumed":               res.Resumed,
+		"system_disk_untouched": true,
 	})
 
 	switch {
@@ -309,9 +319,12 @@ func report(o Options, res *Result, q *quarantine.Set, current string) {
 		return
 	}
 	o.Progress(Progress{
-		Files:       res.Copied + res.Resumed, FilesTotal: res.Planned,
-		Bytes:       res.BytesCopied, BytesTotal: res.BytesPlanned,
-		Quarantined: q.Len(), Current: current,
+		Files:       res.Copied + res.Resumed,
+		FilesTotal:  res.Planned,
+		Bytes:       res.BytesCopied,
+		BytesTotal:  res.BytesPlanned,
+		Quarantined: q.Len(),
+		Current:     current,
 	})
 }
 
@@ -349,8 +362,11 @@ func copyWithRetry(ctx context.Context, o Options, f planned, h hash.Hash, buf [
 		}
 	}
 	q.Add(quarantine.Record{
-		Path:   f.Rel, Stored: f.Stored, Reason: reasonFor(lastErr),
-		Detail: lastErr.Error(), Attempts: attempts,
+		Path:     f.Rel,
+		Stored:   f.Stored,
+		Reason:   reasonFor(lastErr),
+		Detail:   lastErr.Error(),
+		Attempts: attempts,
 	})
 	return manifest.Entry{}, lastErr
 }
@@ -515,6 +531,23 @@ func loadPrior(path string) map[string]manifest.Entry {
 		out[e.Path] = e
 	}
 	return out
+}
+
+// saveManifest writes the manifest unless doing so would destroy a better one.
+//
+// A run cancelled before its first file has an empty manifest. Writing that over
+// the manifest an earlier interrupted run left behind would throw away the only
+// record of what is already on the destination — which is both the resume state
+// and, if the machine never comes back, the post-mortem. An empty manifest says
+// nothing, so when there is nothing to say and something already there, we say
+// nothing.
+func saveManifest(m *manifest.Manifest, path string) error {
+	if m.Len() == 0 {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+	}
+	return writeManifest(m, path)
 }
 
 // writeManifest writes the manifest atomically: a torn manifest is worse than no

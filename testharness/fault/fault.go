@@ -438,8 +438,27 @@ type FireRecord struct {
 	ObservedPhase      string `json:"observed_phase"`
 
 	// OvershootBytes is observed minus pinned. Small is good; large means the installer is reporting
-	// progress too coarsely and the pin is nominal rather than real.
+	// progress too coarsely and the pin is nominal rather than real. It is BOUNDED by Valid: a fault
+	// pinned at 43% that actually fired at 99.9% is not "the fault fired at its pin", it is a different
+	// test wearing that test's name.
 	OvershootBytes int64 `json:"overshoot_bytes"`
+
+	// DestBytesAtFire is the sum of the logical sizes of every file under the archive's data root,
+	// measured INSIDE THE GUEST at the instant the trigger was reached and before the action was
+	// dispatched. It exists because everything else in this record is the subject's own account of
+	// itself: bytes_done, the file index and the phase all come out of a log the installer writes. A
+	// destination tree that is empty while the progress log claims 43% of eight gigabytes have been
+	// copied is the one discrepancy that cannot be explained by a reporting convention.
+	//
+	// -1 means "not measured", and DestScanNote says why. Host-site scenarios (power cut, USB yank) do
+	// not measure: walking ~7,000 files takes hundreds of milliseconds, and spending them between the
+	// pin and the power cut would move the cut. Those runs are covered instead by the archive
+	// verification the runner performs on the verify boot (postcondition P8), which re-hashes the whole
+	// destination tree from raw bytes and needs nothing from the subject at all.
+	DestBytesAtFire int64  `json:"dest_bytes_at_fire"`
+	DestFilesAtFire int    `json:"dest_files_at_fire"`
+	DestScanMS      int64  `json:"dest_scan_ms"`
+	DestScanNote    string `json:"dest_scan_note,omitempty"`
 
 	TargetPath string `json:"target_path,omitempty"`
 	ActionErr  string `json:"action_error,omitempty"`
@@ -450,7 +469,35 @@ type FireRecord struct {
 	OrderViolations int `json:"order_violations"`
 }
 
-func (r FireRecord) Valid() error {
+// DefaultMaxOvershootBytes bounds how far past its pin a fault may fire and still count as having
+// fired AT that pin.
+//
+// The contracted progress granularity (README §5, fault.Progress) is one line per 1 MiB copied plus one
+// per file boundary, so the smallest honest ceiling is 1 MiB. Four is two doublings of headroom for a
+// slow poll on a loaded host, and it is still three orders of magnitude below the 8.4 GB corpus: a fault
+// pinned at 43% cannot drift to 44%, let alone to 99.9%.
+const DefaultMaxOvershootBytes int64 = 4 << 20
+
+// Valid decides whether a fire record is evidence that THIS scenario fired at ITS pin.
+//
+// It takes the scenario rather than reading fields off the record alone, because every field in the
+// record is supplied by the guest and a record is only meaningful relative to what was asked for. The
+// four things it adds over "fired == true" are the four ways a green suite stops meaning anything:
+//
+//	a record for a different scenario                 → the run is not the run it is filed under
+//	a fire in a phase the trigger did not name        → "43% of COPY" measured against VERIFY's bytes
+//	a fire at bytes_done == 0                         → the first progress line, before any byte landed
+//	a fire arbitrarily far past the pin               → "at 43%" that actually happened at 99.9%
+//
+// All four passed the previous version of this function, which checked only Fired and OrderViolations.
+func (r FireRecord) Valid(sc Scenario, maxOvershoot int64) error {
+	if maxOvershoot <= 0 {
+		maxOvershoot = DefaultMaxOvershootBytes
+	}
+	if !strings.EqualFold(r.ScenarioID, sc.ID) {
+		return fmt.Errorf("fire record is for scenario %q but this run is %q: a record filed under the "+
+			"wrong scenario is not evidence about either of them", r.ScenarioID, sc.ID)
+	}
 	if !r.Fired {
 		reason := r.NotFired
 		if reason == "" {
@@ -461,6 +508,39 @@ func (r FireRecord) Valid() error {
 	if r.OrderViolations > 0 {
 		return fmt.Errorf("scenario %s: %d copy-order violations — the installer is not copying in "+
 			"manifest order, so the pin is meaningless", r.ScenarioID, r.OrderViolations)
+	}
+	if r.Pin.Phase != sc.Trigger.Phase || r.Pin.BP != sc.Trigger.BP {
+		return fmt.Errorf("scenario %s: the record was pinned at %s@%dbp but the scenario asks for %s@%dbp",
+			sc.ID, r.Pin.Phase, r.Pin.BP, sc.Trigger.Phase, sc.Trigger.BP)
+	}
+	if r.ObservedPhase != string(sc.Trigger.Phase) {
+		return fmt.Errorf("scenario %s: pinned in phase %s but fired in phase %q. A fraction of COPY's "+
+			"bytes measured against VERIFY's total is a different trigger point wearing this one's name",
+			sc.ID, sc.Trigger.Phase, r.ObservedPhase)
+	}
+	if r.ObservedBytesDone <= 0 {
+		return fmt.Errorf("scenario %s: fired with bytes_done=%d. That is the installer's first progress "+
+			"line, before any byte reached the destination — not %s",
+			sc.ID, r.ObservedBytesDone, r.Pin.String())
+	}
+	if r.ObservedBytesDone < r.Pin.CumulativeBytes {
+		return fmt.Errorf("scenario %s: fired at %d bytes, BEFORE the pin at %d",
+			sc.ID, r.ObservedBytesDone, r.Pin.CumulativeBytes)
+	}
+	if want := r.ObservedBytesDone - r.Pin.CumulativeBytes; r.OvershootBytes != want {
+		return fmt.Errorf("scenario %s: overshoot_bytes=%d but observed-minus-pinned is %d; the record "+
+			"is internally inconsistent", sc.ID, r.OvershootBytes, want)
+	}
+	if r.OvershootBytes > maxOvershoot {
+		return fmt.Errorf("scenario %s: fired %d bytes past its pin, over the %d-byte ceiling. The pin "+
+			"was nominal, not real: this run did not test %s",
+			sc.ID, r.OvershootBytes, maxOvershoot, r.Pin.String())
+	}
+	// The one cross-check that does not come from the subject's own log.
+	if r.DestBytesAtFire == 0 && sc.Trigger.Phase == PhaseCopy && r.Pin.CumulativeBytes > 0 {
+		return fmt.Errorf("scenario %s: the progress log claimed %d bytes copied, but the archive data "+
+			"root held 0 bytes in %d files when the trigger fired. The installer is reporting a copy it "+
+			"is not performing", sc.ID, r.ObservedBytesDone, r.DestFilesAtFire)
 	}
 	return nil
 }

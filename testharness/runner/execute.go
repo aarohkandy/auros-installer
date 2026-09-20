@@ -216,13 +216,13 @@ func executeRun(cfg *Config, suiteID, outDir, kind string, ordinal int, scenario
 	started := time.Now().UTC()
 
 	res := &RunResult{
-		Harness: runnerVersion, SuiteID: suiteID, RunID: runID, Kind: kind, Ordinal: ordinal,
+		Harness:       runnerVersion, SuiteID: suiteID, RunID: runID, Kind: kind, Ordinal: ordinal,
 		Scenario:      scenarioID,
 		HostProfile:   fmt.Sprintf("parallel=%d reclaim_between_runs=%v", cfg.Host.Parallel, cfg.Host.ReclaimBetweenRuns),
 		BaseSystemSHA: cfg.Base.SystemSHA256, BaseDestSHA: cfg.Base.DestSHA256,
-		CorpusDigest: corpusDigest, CorpusProfile: cfg.Base.CorpusProfile,
-		CorpusSeed: cfg.Base.CorpusSeed, CorpusFiles: len(entries),
-		StartedAt: started.Format(time.RFC3339),
+		CorpusDigest:  corpusDigest, CorpusProfile: cfg.Base.CorpusProfile,
+		CorpusSeed:    cfg.Base.CorpusSeed, CorpusFiles: len(entries),
+		StartedAt:     started.Format(time.RFC3339),
 	}
 
 	// Before. If the base moved, nothing measured after this point means anything.
@@ -276,12 +276,12 @@ func executeRun(cfg *Config, suiteID, outDir, kind string, ordinal int, scenario
 
 	// ── phase 1: the run itself ───────────────────────────────────────────────────────────────────
 	spec := VMSpec{
-		QemuBinary: cfg.Qemu.Binary, Accel: cfg.Qemu.Accel,
-		MemoryMB: cfg.Machine.MemoryMB, CPUs: cfg.Machine.CPUs, Headless: cfg.Machine.Headless,
+		QemuBinary:    cfg.Qemu.Binary, Accel: cfg.Qemu.Accel,
+		MemoryMB:      cfg.Machine.MemoryMB, CPUs: cfg.Machine.CPUs, Headless: cfg.Machine.Headless,
 		SystemOverlay: sysOverlay, DestOverlay: destOverlay, MarkerImage: markerRun,
-		QMPSock:     filepath.Join(sockDir, "qmp.sock"),
-		ControlSock: filepath.Join(sockDir, "ctl.sock"),
-		SerialLog:   filepath.Join(dir, "serial.log"),
+		QMPSock:       filepath.Join(sockDir, "qmp.sock"),
+		ControlSock:   filepath.Join(sockDir, "ctl.sock"),
+		SerialLog:     filepath.Join(dir, "serial.log"),
 	}
 	vm := &VM{}
 	if err := vm.Start(spec); err != nil {
@@ -299,19 +299,26 @@ func executeRun(cfg *Config, suiteID, outDir, kind string, ordinal int, scenario
 		res.Notes = append(res.Notes, "control channel never opened: "+cerr.Error())
 	}
 
+	// The host-fault dispatcher. It waits for the guest's "fire" line, screenshots the moment, and
+	// executes. runDone releases it when the run ends without a fire, so the goroutine does not outlive
+	// the run it belongs to — 120 of those would be 120 references to VMs that no longer exist.
 	dispatchErr := make(chan error, 1)
+	runDone := make(chan struct{})
+	hostFired := make(chan fault.Action, 1)
 	if kind == "fault" && sc.Site == fault.SiteHost {
 		go func() {
-			f, ok := <-ctl.fire
-			if !ok {
-				return
+			select {
+			case f := <-ctl.fire:
+				_ = vm.Screendump(filepath.Join(dir, "at-fire.ppm"))
+				hostFired <- f.Action
+				dispatchErr <- fault.HostDispatch(f, vm)
+			case <-runDone:
 			}
-			_ = vm.Screendump(filepath.Join(dir, "at-fire.ppm"))
-			dispatchErr <- fault.HostDispatch(f, vm)
 		}()
 	}
 
 	exited, _ := vm.Wait(time.Duration(cfg.Timeouts.RunSec) * time.Second)
+	close(runDone)
 	if !exited {
 		_ = vm.Screendump(filepath.Join(dir, "timeout.ppm"))
 		_ = vm.PowerCut()
@@ -323,6 +330,17 @@ func executeRun(cfg *Config, suiteID, outDir, kind string, ordinal int, scenario
 	case de := <-dispatchErr:
 		if de != nil {
 			res.Notes = append(res.Notes, "host fault dispatch: "+de.Error())
+		}
+	default:
+	}
+	select {
+	case act := <-hostFired:
+		// A power cut kills the guest outright: there is no exit code and there never will be, so the
+		// result must say the harness ended the run rather than leaving a zero exit code to be read as
+		// success by anything downstream.
+		if act == fault.ActionPowerCut {
+			res.Installer.Killed = true
+			res.Notes = append(res.Notes, "the run ended in an induced power cut; no installer exit code exists")
 		}
 	default:
 	}

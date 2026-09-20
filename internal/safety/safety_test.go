@@ -240,8 +240,10 @@ func TestVerify_RefusesWhenQuarantineIsNotEmpty(t *testing.T) {
 	// zero.
 	f := newFixture(t, sampleFiles())
 	f.q.Add(quarantine.Record{
-		Path:   "Documents/locked.pst", Reason: quarantine.ReasonLocked,
-		Detail: "in use by Outlook", Attempts: 2,
+		Path:     "Documents/locked.pst",
+		Reason:   quarantine.ReasonLocked,
+		Detail:   "in use by Outlook",
+		Attempts: 2,
 	})
 	m := atVerifyBoundary(t, ModeCommit, f.log)
 
@@ -370,7 +372,11 @@ func TestArm_DryRunIsTheDefaultAndDoesNotCross(t *testing.T) {
 	}
 
 	res, err := Arm(context.Background(), m, va, ArmRequest{
-		SystemVolumeGUID: sysGUID, SystemMount: "C:", BitLockerProtected: true, Restart: true, Log: f.log,
+		SystemVolumeGUID:   sysGUID,
+		SystemMount:        "C:",
+		BitLockerProtected: true,
+		Restart:            true,
+		Log:                f.log,
 	})
 	if err != nil {
 		t.Fatalf("dry-run Arm: %v", err)
@@ -411,7 +417,10 @@ func TestArm_CommitModeIsStillCompiledOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = Arm(context.Background(), m, va, ArmRequest{
-		SystemVolumeGUID: sysGUID, SystemMount: "C:", BitLockerProtected: true, Log: f.log,
+		SystemVolumeGUID:   sysGUID,
+		SystemMount:        "C:",
+		BitLockerProtected: true,
+		Log:                f.log,
 	})
 	if err == nil {
 		t.Fatal("commit-mode Arm succeeded: the privileged steps are NOT compiled out")

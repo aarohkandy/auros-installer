@@ -373,9 +373,11 @@ func usage() {
         Re-hash every file under DIR and compare against the golden manifest. This is the zero-data-loss
         check the runner executes after EVERY run, clean or aborted.
 
-  gen hold -plan FILE -until FILE
+  gen hold -plan FILE -until FILE -token FILE -root DIR
         Hold the plan's locked files open with exclusive sharing until -until appears. Run as a separate
-        process before the installer starts: a process that has exited holds no handles.
+        process before the installer starts: a process that has exited holds no handles. Refuses, like
+        "generate" does, on any volume the harness token does not vouch for, and refuses any path in
+        the plan that is not under -root.
 `)
 }
 
@@ -653,15 +655,26 @@ func plan(seed uint64, winRoot string, count int, buckets []bucket) ([]FileRec, 
 	if nNear+nOver > len(pend) {
 		nNear, nOver = 2, 1
 	}
-	for i := 0; i < nNear; i++ {
-		pend[i].dir = deepNear
-		pend[i].size = 1 + r.int64n(4096)
-		pend[i].cohort = "near_max_path"
+	// Spread across the allocation rather than taking the first 48 entries, which all come from whichever
+	// bucket happens to be first in the table — that would have quietly turned a third of the zero-byte
+	// cohort into deep-path files and nobody would have noticed until a zero-byte bug shipped.
+	stride := len(pend) / (nNear + nOver)
+	if stride < 1 {
+		stride = 1
 	}
-	for i := nNear; i < nNear+nOver; i++ {
-		pend[i].dir = deepOver
+	for k := 0; k < nNear+nOver; k++ {
+		i := k * stride
+		if i >= len(pend) {
+			break
+		}
 		pend[i].size = 1 + r.int64n(4096)
-		pend[i].cohort = "over_max_path"
+		if k < nNear {
+			pend[i].dir = deepNear
+			pend[i].cohort = "near_max_path"
+		} else {
+			pend[i].dir = deepOver
+			pend[i].cohort = "over_max_path"
+		}
 	}
 
 	// Names, with collision avoidance per directory so that the corpus never depends on the filesystem's
@@ -902,6 +915,12 @@ func padName(base, ext string, dirLen, target int) string {
 	want := target - dirLen - 1 - len([]rune(ext))
 	if want < 8 {
 		want = 8
+	}
+	// NTFS caps a single path COMPONENT at 255 characters, which is a different limit from MAX_PATH and
+	// is the one that bites here: a deep chain that ended early would otherwise ask for a 270-character
+	// filename and fail to create, turning a deliberate length test into a crash.
+	if want > 200 {
+		want = 200
 	}
 	rs := []rune(base)
 	for len(rs) < want {
@@ -1166,10 +1185,20 @@ func writeJSON(path string, v any) error {
 // would fail twenty runs that passed, and — much worse — not distinguishing them would let real data
 // loss hide inside an expected deviation.
 type VerifyResult struct {
+	// Label says WHICH tree was verified: "source" is the corpus on C:, "archive" is the copy the
+	// installer materialised on the destination. It is in the result rather than only in the command
+	// line because the runner reads both from one serial log, and two structurally identical JSON
+	// objects distinguished only by argument order is how a harness ends up verifying the source twice
+	// and calling the second one the destination.
+	Label             string   `json:"label"`
 	Root              string   `json:"root"`
 	ManifestSHA       string   `json:"manifest_sha256"`
 	Expected          int      `json:"expected_files"`
 	Present           int      `json:"present_files"`
+	// PresentBytes is the summed logical size of the files that were found. On an aborted run the
+	// archive is legitimately partial, so its byte total is the only number that says whether the
+	// installer was copying at all.
+	PresentBytes      int64    `json:"present_bytes"`
 	HashMatches       int      `json:"hash_matches"`
 	Missing           []string `json:"missing,omitempty"`
 	Corrupt           []string `json:"corrupt,omitempty"`
@@ -1185,6 +1214,14 @@ func cmdVerify(args []string) error {
 	root := fs.String("root", "", "corpus root")
 	man := fs.String("manifest", "", "golden-manifest.jsonl")
 	out := fs.String("out", "", "write the VerifyResult JSON here (default: stdout only)")
+	label := fs.String("label", "source",
+		`which tree this is: "source" (the corpus) or "archive" (the copy on the destination)`)
+	stdoutJSON := fs.Bool("stdout-json", false,
+		"print the full result JSON to stdout between `verify-begin <label>` / `verify-end <label>` "+
+			"markers. The guest uses this to report over the serial line WITHOUT writing a file first: "+
+			"a destination that a fault scenario has just filled or detached cannot hold the report "+
+			"about itself, and a verification whose result cannot be delivered is a verification that "+
+			"did not happen.")
 	allow := fs.String("allow-missing", "",
 		"comma-separated relative paths a fault scenario deliberately removed. Anything not listed here "+
 			"that is missing is DATA LOSS.")
@@ -1208,7 +1245,11 @@ func cmdVerify(args []string) error {
 		}
 	}
 
-	res := VerifyResult{Root: *root, ManifestSHA: msha, Expected: len(recs), AllowedDeviations: allowedList}
+	if *label != "source" && *label != "archive" {
+		return fmt.Errorf("-label must be source or archive, not %q", *label)
+	}
+	res := VerifyResult{Label: *label, Root: *root, ManifestSHA: msha, Expected: len(recs),
+		AllowedDeviations: allowedList}
 	for i := range recs {
 		rec := &recs[i]
 		abs := localPath(*root, rec.Path)
@@ -1221,6 +1262,7 @@ func cmdVerify(args []string) error {
 			continue
 		}
 		res.Present++
+		res.PresentBytes += st.Size()
 		if st.Size() != rec.Size {
 			res.SizeMismatch = append(res.SizeMismatch, rec.Path)
 			continue
@@ -1250,13 +1292,24 @@ func cmdVerify(args []string) error {
 		len(res.SizeMismatch) == 0 && len(res.Unreadable) == 0
 
 	if *out != "" {
-		if err := writeJSON(*out, res); err != nil {
+		if err := writeJSON(*out, res); err != nil && !*stdoutJSON {
 			return err
+		} else if err != nil {
+			// The report still has to reach the runner. A destination the fault scenario just filled
+			// cannot hold the file, and that must not swallow the measurement.
+			fmt.Fprintf(os.Stderr, "gen verify: could not write %s: %v\n", *out, err)
 		}
 	}
-	fmt.Printf("expected=%d present=%d hash_ok=%d missing=%d corrupt=%d size_mismatch=%d unreadable=%d clean=%v\n",
-		res.Expected, res.Present, res.HashMatches, len(res.Missing), len(res.Corrupt),
-		len(res.SizeMismatch), len(res.Unreadable), res.Clean)
+	if *stdoutJSON {
+		b, merr := json.Marshal(res)
+		if merr != nil {
+			return merr
+		}
+		fmt.Printf("verify-begin %s\n%s\nverify-end %s\n", res.Label, string(b), res.Label)
+	}
+	fmt.Printf("verify %s expected=%d present=%d present_bytes=%d hash_ok=%d missing=%d corrupt=%d size_mismatch=%d unreadable=%d clean=%v\n",
+		res.Label, res.Expected, res.Present, res.PresentBytes, res.HashMatches, len(res.Missing),
+		len(res.Corrupt), len(res.SizeMismatch), len(res.Unreadable), res.Clean)
 	if !res.Clean {
 		// Non-zero exit so that a caller which forgets to read the JSON still fails.
 		os.Exit(3)
@@ -1272,12 +1325,25 @@ func cmdHold(args []string) error {
 	fs := flag.NewFlagSet("hold", flag.ExitOnError)
 	planPath := fs.String("plan", "", "corpus-plan.json")
 	until := fs.String("until", "", "release the handles once this file exists")
+	tokenPath := fs.String("token", "", "harness token on the AUROS-HARNESS marker volume (REQUIRED)")
+	root := fs.String("root", "", "the corpus root the plan's locked files must live under (REQUIRED)")
 	pollMS := fs.Int("poll-ms", 200, "how often to look for -until")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *planPath == "" || *until == "" {
 		return errors.New("-plan and -until are required")
+	}
+	// §4.7. `hold` takes exclusive, no-sharing handles on files named by a JSON file, and the previous
+	// version took them wherever the JSON pointed. That made it the one guest tool in the harness with
+	// no guard at all — and the one the 100 CLEAN runs start, which is to say the guard was absent from
+	// five sixths of the suite. There is no -force here either.
+	if *tokenPath == "" || *root == "" {
+		return errors.New("-token and -root are required: `gen hold` opens exclusive handles on real " +
+			"files and will not do that on a volume the harness token does not vouch for (spec §4.7)")
+	}
+	if _, err := assertScratchTarget(*root, *tokenPath); err != nil {
+		return err
 	}
 	b, err := os.ReadFile(*planPath)
 	if err != nil {
@@ -1287,12 +1353,36 @@ func cmdHold(args []string) error {
 	if err := json.Unmarshal(b, &p); err != nil {
 		return err
 	}
+	// The token vouches for a VOLUME. The plan names PATHS. Without this, a plan that listed
+	// C:\Windows\System32\config\SAM would pass the volume check on a machine whose C: happened to be
+	// the vouched-for one, which is exactly the aliasing the guard exists to prevent.
+	for _, f := range p.LockedFiles {
+		if !underRoot(*root, f) {
+			return fmt.Errorf("REFUSING: the plan asks to lock %s, which is not under the corpus root %s",
+				f, *root)
+		}
+	}
 	release, err := platHoldExclusive(p.LockedFiles)
 	if err != nil {
 		return err
 	}
 	defer release()
-	fmt.Printf("holding %d files exclusively; waiting for %s\n", len(p.LockedFiles), *until)
+	fmt.Printf("holding %d files exclusively under %s; waiting for %s\n", len(p.LockedFiles), *root, *until)
 	platWaitForFile(*until, *pollMS)
 	return nil
+}
+
+// underRoot reports whether path lies inside root. Case-insensitive and separator-normalised, because
+// the comparison is against Windows paths written into a JSON file on another machine.
+func underRoot(root, path string) bool {
+	norm := func(s string) string {
+		s = strings.ReplaceAll(s, "/", `\`)
+		s = strings.TrimRight(s, `\`)
+		return strings.ToLower(s)
+	}
+	r, q := norm(root), norm(path)
+	if r == "" {
+		return false
+	}
+	return strings.HasPrefix(q, r+`\`)
 }

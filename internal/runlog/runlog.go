@@ -120,7 +120,8 @@ func (l *Logger) Event(phase, kind string, f Fields) {
 	for k := range f {
 		switch k {
 		case "seq", "ts", "phase", "kind":
-			// Reserved. Prefix rather than drop, so nothing is lost.
+			// Reserved. A payload field must never be able to rewrite the
+			// phase or the sequence number a post-mortem is read by.
 			continue
 		}
 		keys = append(keys, k)

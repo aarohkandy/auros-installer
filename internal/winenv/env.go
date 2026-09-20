@@ -14,7 +14,9 @@ package winenv
 
 import (
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 )
 
 // TriState exists because "we do not know" is a real and common answer for
@@ -105,6 +107,51 @@ type Env interface {
 	SystemVolume() (Volume, error)
 	Firmware() (Firmware, error)
 	CloudPlaceholders(root string) (PlaceholderStats, error)
+
+	// VolumeForPath names the volume that ACTUALLY holds path, by asking the
+	// operating system rather than by comparing the path against a list of
+	// drive roots.
+	//
+	// This distinction is the whole reason the method exists. `D:\backup` can be
+	// an NTFS junction onto `C:\AurosBackup`; its drive letter says D: and every
+	// byte written through it lands on C:. A string prefix test reports the
+	// volume of the LETTER. GetVolumePathNameW reports the volume of the
+	// DIRECTORY. Only the second one is an identity.
+	//
+	// The caller must pass an already-resolved path (see IsReparsePoint): this
+	// answers "which volume holds this path", not "is this path a link".
+	VolumeForPath(path string) (Volume, error)
+
+	// IsReparsePoint reports whether path is itself a reparse point — an NTFS
+	// junction, a directory symlink, a mount point — without following it.
+	IsReparsePoint(path string) (bool, error)
+}
+
+// PathUnderMount reports whether path lies within mount, comparing whole path
+// segments so that "C:\Users2" is not treated as being inside "C:\Users". It is
+// used by the synthetic environment and by refusal messages; the real Windows
+// answer comes from VolumeForPath, never from this.
+func PathUnderMount(path, mount string) bool {
+	p, m := normPathForCompare(path), normPathForCompare(mount)
+	if p == "" || m == "" {
+		return false
+	}
+	if p == m {
+		return true
+	}
+	if m == "/" {
+		return strings.HasPrefix(p, "/")
+	}
+	return strings.HasPrefix(p, m+"/")
+}
+
+func normPathForCompare(p string) string {
+	p = strings.ReplaceAll(p, `\`, "/")
+	p = strings.ToLower(p)
+	for len(p) > 1 && strings.HasSuffix(p, "/") {
+		p = p[:len(p)-1]
+	}
+	return p
 }
 
 // SyntheticConfig describes a fake machine.
@@ -171,6 +218,42 @@ func (e *syntheticEnv) Firmware() (Firmware, error) {
 	return e.cfg.FW, nil
 }
 
+// VolumeForPath resolves a path to one of the configured volumes by longest
+// matching mount point, compared segment-wise. The synthetic environment is the
+// one that runs on Linux CI and in the rehearsal mode, so it has to answer this
+// question the same SHAPE as Windows does: a path under the system mount must
+// come back as the system volume even when the caller reached it through a link.
+func (e *syntheticEnv) VolumeForPath(path string) (Volume, error) {
+	if e.cfg.Err != nil {
+		return Volume{}, e.cfg.Err
+	}
+	var best Volume
+	found := false
+	for _, v := range e.cfg.Vols {
+		if v.Mount == "" || !PathUnderMount(path, v.Mount) {
+			continue
+		}
+		if !found || len(normPathForCompare(v.Mount)) > len(normPathForCompare(best.Mount)) {
+			best, found = v, true
+		}
+	}
+	if !found {
+		return Volume{}, fmt.Errorf("winenv: no configured volume holds %s", path)
+	}
+	return best, nil
+}
+
+// IsReparsePoint reports whether path is a link, without following it. On the
+// synthetic environment that is an lstat; ModeIrregular is included because that
+// is how some reparse points surface.
+func (e *syntheticEnv) IsReparsePoint(path string) (bool, error) {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	return st.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0, nil
+}
+
 func (e *syntheticEnv) CloudPlaceholders(string) (PlaceholderStats, error) {
 	if e.cfg.Err != nil {
 		return PlaceholderStats{}, e.cfg.Err
@@ -198,12 +281,22 @@ func DefaultSynthetic(sysMount, destMount string) SyntheticConfig {
 		},
 		Vols: []Volume{
 			{
-				GUID:  `\\?\Volume{11111111-1111-1111-1111-111111111111}\`, Mount: sysMount,
-				Label: "OS", FS: "NTFS", TotalBytes: 250 << 30, FreeBytes: 40 << 30, IsSystem: true,
+				GUID:       `\\?\Volume{11111111-1111-1111-1111-111111111111}\`,
+				Mount:      sysMount,
+				Label:      "OS",
+				FS:         "NTFS",
+				TotalBytes: 250 << 30,
+				FreeBytes:  40 << 30,
+				IsSystem:   true,
 			},
 			{
-				GUID:  `\\?\Volume{22222222-2222-2222-2222-222222222222}\`, Mount: destMount,
-				Label: "BACKUP", FS: "exFAT", TotalBytes: 128 << 30, FreeBytes: 120 << 30, Removable: true,
+				GUID:       `\\?\Volume{22222222-2222-2222-2222-222222222222}\`,
+				Mount:      destMount,
+				Label:      "BACKUP",
+				FS:         "exFAT",
+				TotalBytes: 128 << 30,
+				FreeBytes:  120 << 30,
+				Removable:  true,
 			},
 		},
 		FW: Firmware{

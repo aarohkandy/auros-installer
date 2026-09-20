@@ -1,0 +1,90 @@
+{
+  "$comment": "Runner configuration. Everything here describes the HOST and the two images built once from an Evaluation Center ISO; see ../README.md for how to build them legally and how this file gets filled in. The `$comment` key convention matches auros.config.json. Values below are the SHAPE of a real config — the sha256 and volume-serial fields are empty because no base image has been built yet (BLOCKED.md B1), and `runner doctor` refuses to start a suite while they are.",
+
+  "qemu": {
+    "binary": "/usr/bin/qemu-system-x86_64",
+    "img": "/usr/bin/qemu-img",
+    "accel": "kvm"
+  },
+
+  "base": {
+    "$comment": "Built ONCE. The corpus is baked in at base-build time rather than generated per run: 18,000 files is gigabytes of writing, the corpus is deterministic so every run would produce the same one, and baking it in means the base image's SHA-256 covers the corpus — a stronger statement than 'we generated it again and it hashed the same'.",
+    "system_image": "/srv/auros/base/windows-base.qcow2",
+    "system_sha256": "",
+    "system_volume_serial": "",
+    "dest_image": "/srv/auros/base/dest-empty-ntfs.qcow2",
+    "dest_sha256": "",
+    "dest_volume_serial": "",
+
+    "corpus_seed": 20260920,
+    "corpus_profile": "realistic",
+    "corpus_count": 18000,
+    "corpus_digest": "",
+    "corpus_faithful": false,
+
+    "system_state_sha256": "",
+
+    "windows_edition": "",
+    "iso_source": ""
+  },
+
+  "machine": {
+    "memory_mb": 4096,
+    "cpus": 2,
+    "headless": true
+  },
+
+  "host": {
+    "$comment": "BLOCKED.md B1 is unresolved: there is no confirmed host with ~100 GB free. parallel=1 with reclaim_between_runs is the small-host path and is the default, because a suite that finishes slowly is worth more than one that ENOSPCs somebody else's job at run 61. On a big host raise parallel; nothing else changes and the evidence is identical.",
+    "work_dir": "/srv/auros/work",
+    "artifact_dir": "/srv/auros/artifacts",
+    "parallel": 1,
+    "min_free_gb": 40,
+    "reclaim_between_runs": true,
+    "keep_overlay_on_fail": true
+  },
+
+  "guest": {
+    "$comment": "Drive letters are fixed when the base image is built (see README: 'Assign the volumes'). The marker volume is found by the run script from its own path, so only these two letters are load-bearing.",
+    "corpus_root": "C:\\Users\\student",
+    "dest_volume": "E:\\",
+    "dest_data_root": "E:\\auros-archive\\data",
+    "progress_path": "E:\\auros-progress.ndjson",
+    "installer_manifest": "E:\\auros-archive\\manifest.jsonl",
+    "marker_drive": "X:\\"
+  },
+
+  "binaries": {
+    "$comment": "Host paths to the Windows executables that get copied onto the marker volume each run, plus the golden manifest produced when the base image was built.",
+    "installer_exe": "../../dist/auros-migrate.exe",
+    "faultagent_exe": "../../dist/faultagent.exe",
+    "gen_exe": "../../dist/gen.exe",
+    "golden_manifest": "/srv/auros/base/golden-manifest.jsonl",
+    "golden_meta": "/srv/auros/base/golden-manifest.meta.json",
+    "corpus_plan": "/srv/auros/base/corpus-plan.json"
+  },
+
+  "installer_args": [
+    "--commit",
+    "--dest", "%DEST%",
+    "--progress", "%PROGRESS%",
+    "--source", "%CORPUS%",
+    "--no-arm"
+  ],
+
+  "installer_scope": "SAFETY.md phases 1-5 (INVENTORY, DISCLOSE, DESTINATION, COPY, VERIFY). --no-arm withholds phase 6, so these runs prove the data-integrity half of the migration and deliberately stop at the wall. Phases 6-7 have their own, smaller, end-to-end suite because arming the machine means it next boots the Auros image rather than Windows, which is incompatible with the 'Windows still boots normally' check these 120 runs exist to make. REPORT.md states this on its face; '100 successful migrations' would otherwise be read as covering a phase that was never run.",
+
+  "timeouts": {
+    "run_sec": 5400,
+    "boot_check_sec": 600,
+    "verify_sec": 3600,
+    "normal_boot_seconds": 180
+  },
+
+  "mtools": {
+    "$comment": "The marker volume is built with mtools so that preparing a test needs no root and no loop mount. A harness that needs sudo is a harness that gets run less often.",
+    "mkfs_vfat": "/usr/sbin/mkfs.vfat",
+    "mcopy": "/usr/bin/mcopy",
+    "marker_size_mb": 256
+  }
+}

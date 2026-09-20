@@ -226,7 +226,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: fault-${{ matrix.fault }}, path: ${{ runner.temp }}/fault.json, if-no-files-found: warn }
+        with:
+          name: fault-${{ matrix.fault }}
+          path: ${{ runner.temp }}/fault.json
+          if-no-files-found: warn
 
   verdict:
     needs: [clean, abort]

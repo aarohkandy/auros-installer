@@ -33,6 +33,7 @@ var (
 	procGetDiskFreeSpaceExW            = kernel32.NewProc("GetDiskFreeSpaceExW")
 	procGetDriveTypeW                  = kernel32.NewProc("GetDriveTypeW")
 	procGetWindowsDirectoryW           = kernel32.NewProc("GetWindowsDirectoryW")
+	procGetVolumePathNameW             = kernel32.NewProc("GetVolumePathNameW")
 	procGetFileAttributesW             = kernel32.NewProc("GetFileAttributesW")
 
 	procRegOpenKeyExW    = advapi32.NewProc("RegOpenKeyExW")
@@ -259,6 +260,58 @@ func (w *winEnv) SystemVolume() (Volume, error) {
 	v, verr := volumeAt(root)
 	v.IsSystem = true
 	return v, verr
+}
+
+// VolumeForPath asks Windows which volume holds this path.
+//
+// GetVolumePathNameW returns the mount point of the volume that the path is
+// ACTUALLY on — it walks the path's real parentage, so a directory that lives on
+// C: answers "C:\" even when the caller reached it through a junction on D:.
+// GetVolumeNameForVolumeMountPointW then turns that mount point into the volume
+// GUID, which is the only identity SAFETY.md phase 3 accepts.
+//
+// Deriving a volume from a string prefix against GetLogicalDriveStringsW — which
+// is what this replaced — answers a different question: the identity of the
+// DRIVE LETTER the user typed. That is exactly the answer a junction forges.
+func (w *winEnv) VolumeForPath(path string) (Volume, error) {
+	pp, err := syscall.UTF16PtrFromString(longPath(path))
+	if err != nil {
+		return Volume{}, err
+	}
+	buf := make([]uint16, 32768)
+	r, _, e := procGetVolumePathNameW.Call(
+		uintptr(unsafe.Pointer(pp)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)),
+	)
+	if r == 0 {
+		return Volume{}, fmt.Errorf("winenv: GetVolumePathName(%s): %v", path, e)
+	}
+	root := utf16ToString(buf)
+	if root == "" {
+		return Volume{}, fmt.Errorf("winenv: GetVolumePathName(%s) returned no mount point", path)
+	}
+	if !strings.HasSuffix(root, `\`) {
+		root += `\`
+	}
+	v, verr := volumeAt(root)
+	if verr != nil {
+		return Volume{}, verr
+	}
+	if sys, serr := w.SystemVolume(); serr == nil && sys.GUID != "" && sys.GUID == v.GUID {
+		v.IsSystem = true
+	}
+	return v, nil
+}
+
+// IsReparsePoint reports FILE_ATTRIBUTE_REPARSE_POINT on the path ITSELF.
+// GetFileAttributesW reports the attributes of the link rather than of its
+// target, which is what makes it the right call here: we are asking whether this
+// name is a door to somewhere else, not what is behind the door.
+func (w *winEnv) IsReparsePoint(path string) (bool, error) {
+	attrs, err := fileAttributes(path)
+	if err != nil {
+		return false, err
+	}
+	return attrs&attrReparsePoint != 0, nil
 }
 
 func (w *winEnv) Firmware() (Firmware, error) {

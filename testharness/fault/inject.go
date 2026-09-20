@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -161,6 +164,21 @@ func GuestExecute(cfg GuestConfig, guest GuestControl) (FireRecord, error) {
 
 	log("scenario %s fired at %d bytes (overshoot %d)", sc.ID, rec.ObservedBytesDone, rec.OvershootBytes)
 
+	// ── the one measurement that is not the subject's own account of itself ───────────────────────
+	//
+	// Everything above came out of the installer's progress log. An installer that writes a
+	// well-formed log and copies nothing produces exactly the record above. So before the action is
+	// dispatched, walk the archive's data root and sum what is actually on the destination.
+	//
+	// Host-site scenarios do not do this: the walk costs hundreds of milliseconds and spending them
+	// between the pin and a power cut would move the cut, which is the one thing those scenarios are
+	// for. They are covered instead by the runner's archive verification on the verify boot (P8),
+	// which re-hashes the whole destination tree and needs nothing from the guest at all.
+	rec.DestBytesAtFire, rec.DestFilesAtFire, rec.DestScanMS, rec.DestScanNote =
+		scanDestination(sc, cfg.DestDataRoot)
+	log("scenario %s destination at fire: %d bytes in %d files (%dms) %s",
+		sc.ID, rec.DestBytesAtFire, rec.DestFilesAtFire, rec.DestScanMS, rec.DestScanNote)
+
 	// Evidence first, damage second. Always.
 	if cfg.PreFire != nil {
 		if err := cfg.PreFire(rec); err != nil {
@@ -285,6 +303,48 @@ func dispatchGuest(cfg GuestConfig, pin Pin, g GuestControl, rec *FireRecord) er
 // file at relative path P is materialised at <DestDataRoot>\P.
 func destPath(root, rel string) string {
 	return strings.TrimRight(root, `\`) + `\` + strings.ReplaceAll(rel, "/", `\`)
+}
+
+// scanDestination sums the logical sizes of every file under the archive's data root.
+//
+// Returns (-1, 0, 0, reason) when the scan is deliberately not performed. "Deliberately" is the whole
+// point of returning a reason rather than a zero: a zero here is a finding, and a finding must never be
+// indistinguishable from a measurement that was skipped.
+func scanDestination(sc Scenario, destDataRoot string) (bytes int64, files int, elapsedMS int64, note string) {
+	if sc.Site == SiteHost {
+		return -1, 0, 0, "not measured: host-site scenario, and the walk would delay the action past its pin"
+	}
+	if destDataRoot == "" {
+		return -1, 0, 0, "not measured: no archive data root configured"
+	}
+	start := time.Now()
+	err := filepath.WalkDir(destDataRoot, func(_ string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			// A file that vanished under the walk, or a directory we may not read. Neither is grounds
+			// for abandoning the count; both are grounds for not pretending the count is exact.
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		files++
+		bytes += info.Size()
+		return nil
+	})
+	elapsedMS = time.Since(start).Milliseconds()
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The archive root does not exist at all. That is a measurement of zero, not a failure to
+			// measure, and it is precisely the finding this scan exists to make.
+			return 0, 0, elapsedMS, "archive data root does not exist"
+		}
+		return -1, 0, elapsedMS, "not measured: " + err.Error()
+	}
+	return bytes, files, elapsedMS, ""
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────

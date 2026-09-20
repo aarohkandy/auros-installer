@@ -76,10 +76,10 @@ type BaseCfg struct {
 	DestSHA256         string `json:"dest_sha256"`
 	DestVolumeSerial   string `json:"dest_volume_serial"`
 
-	CorpusSeed    uint64 `json:"corpus_seed"`
-	CorpusProfile string `json:"corpus_profile"`
-	CorpusCount   int    `json:"corpus_count"`
-	CorpusDigest  string `json:"corpus_digest"`
+	CorpusSeed     uint64 `json:"corpus_seed"`
+	CorpusProfile  string `json:"corpus_profile"`
+	CorpusCount    int    `json:"corpus_count"`
+	CorpusDigest   string `json:"corpus_digest"`
 	CorpusFaithful bool  `json:"corpus_faithful"`
 
 	// SystemStateSHA256 is the pristine value of the boot-critical region, captured at base build time.
@@ -670,7 +670,7 @@ func cmdReport(args []string) error {
 		if jerr := json.Unmarshal(b, &r); jerr != nil {
 			// A result that does not parse is a FAILED run, never an absent one.
 			results = append(results, &RunResult{
-				RunID: p, Verdict: "fail",
+				RunID:  p, Verdict: "fail",
 				Checks: []Check{{ID: "SCHEMA", Name: "result parses", Status: "fail", Detail: jerr.Error()}},
 			})
 			return nil
