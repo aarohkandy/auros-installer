@@ -8,8 +8,10 @@
   "required": [
     "harness", "suite_id", "run_id", "kind", "ordinal", "host_profile",
     "base_system_sha256", "base_dest_sha256", "corpus_digest", "corpus_profile",
-    "corpus_seed", "corpus_files", "started_at", "finished_at", "duration_ms",
-    "installer", "corpus_verify", "boot_check", "checks", "artifacts", "verdict"
+    "corpus_seed", "corpus_files", "corpus_faithful",
+    "windows_edition", "iso_source", "installer_scope",
+    "started_at", "finished_at", "duration_ms",
+    "installer", "corpus_verify", "archive_verify", "boot_check", "checks", "artifacts", "verdict"
   ],
   "properties": {
     "harness": { "type": "string" },
@@ -42,6 +44,20 @@
     },
     "corpus_seed": { "type": "integer", "minimum": 0 },
     "corpus_files": { "type": "integer", "minimum": 1 },
+    "corpus_faithful": {
+      "type": "boolean",
+      "description": "The corpus in the base image was generated ON WINDOWS. False means it has no read-only bits, no alternate data streams and no offline attributes, and a pass against it is not the §6C exit condition."
+    },
+
+    "windows_edition": {
+      "type": "string",
+      "description": "Provenance, recorded at RUN time from the config the run used. REPORT.md's header is built from these fields and every run must agree, because a header assembled from the config file as it reads at REPORT time is a claim about a file rather than about the runs."
+    },
+    "iso_source": { "type": "string" },
+    "installer_scope": {
+      "type": "string",
+      "description": "Which of SAFETY.md's phases this run exercised. Stored per run so that a suite cannot be re-labelled after the fact by editing one line of configuration."
+    },
 
     "started_at": { "type": "string", "format": "date-time" },
     "finished_at": { "type": "string", "format": "date-time" },
@@ -77,8 +93,15 @@
         "observed_phase": { "type": "string" },
         "overshoot_bytes": {
           "type": "integer",
-          "description": "Observed minus pinned. Large means the installer reports progress too coarsely and the pin is nominal rather than real; it is published per run so a reader can judge that instead of trusting it."
+          "description": "Observed minus pinned, and BOUNDED by fault.FireRecord.Valid against max_overshoot_bytes. A fault pinned at 43% that actually fired at 99.9% is not that fault; it is a different test wearing its name."
         },
+        "dest_bytes_at_fire": {
+          "type": "integer",
+          "description": "The summed logical size of the archive's data root, measured in the guest at the instant the trigger fired. -1 means not measured (host-site scenarios do not measure: the walk would delay the power cut past its pin). ZERO is a finding: the progress log claimed bytes copied and the destination held none."
+        },
+        "dest_files_at_fire": { "type": "integer" },
+        "dest_scan_ms": { "type": "integer" },
+        "dest_scan_note": { "type": "string" },
         "target_path": { "type": "string" },
         "action_error": { "type": "string" },
         "not_fired_reason": { "type": "string" },
@@ -92,14 +115,22 @@
     "installer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["exit_code", "exit_reported", "killed_by_harness"],
+      "required": ["exit_code", "exit_reported", "killed_by_power_cut", "killed_by_run_timeout"],
       "properties": {
         "exit_code": { "type": "integer" },
         "exit_reported": {
           "type": "boolean",
           "description": "False after a power cut, where no exit code exists and never will. A zero exit_code with exit_reported false must never be read as success."
         },
-        "killed_by_harness": { "type": "boolean" },
+        "killed_by_power_cut": {
+          "type": "boolean",
+          "description": "The run ended in an INDUCED power cut. Expected; this is what an abort looks like for F01-F04."
+        },
+        "killed_by_run_timeout": {
+          "type": "boolean",
+          "description": "The guest never powered off and the harness killed it. NEVER an abort, always a failing run (P9). These were one field once, and an installer that hung forever instead of aborting therefore scored a clean abort on every abort scenario in the suite."
+        },
+        "run_timeout_note": { "type": "string" },
         "phase_reached": { "type": "string" }
       }
     },
@@ -107,11 +138,17 @@
     "corpus_verify": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["expected_files", "present_files", "hash_matches", "clean", "reported"],
-      "description": "Every source file re-hashed against the golden manifest AFTER the run — clean or aborted, no exceptions. This is 'zero data loss' as a measurement.",
+      "required": ["label", "manifest_sha256", "expected_files", "present_files", "present_bytes", "hash_matches", "clean", "reported"],
+      "description": "The SOURCE corpus re-hashed against the golden manifest AFTER the run — clean or aborted, no exceptions. This is half of spec §4.1: 'the installer did not damage the original'. The other half is archive_verify.",
       "properties": {
+        "label": { "enum": ["source", "archive"] },
+        "manifest_sha256": {
+          "type": "string",
+          "description": "SHA-256 of the manifest the GUEST verified against. Postcondition P4 requires it to equal the suite's corpus digest: without that, a guest verifying against a twelve-entry manifest reports 12/12 clean and the harness has no way to tell that from 18,000/18,000."
+        },
         "expected_files": { "type": "integer" },
         "present_files": { "type": "integer" },
+        "present_bytes": { "type": "integer" },
         "hash_matches": { "type": "integer" },
         "missing": { "type": "array", "items": { "type": "string" } },
         "corrupt": { "type": "array", "items": { "type": "string" } },
@@ -126,6 +163,34 @@
         "reported": {
           "type": "boolean",
           "description": "False means the guest never finished re-hashing. That is a failed run: an unmeasured corpus is not a verified one."
+        }
+      }
+    },
+
+    "archive_verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "manifest_sha256", "expected_files", "present_files", "present_bytes", "hash_matches", "clean", "reported"],
+      "description": "The DESTINATION archive re-hashed against the golden manifest after the run, from raw bytes, by the harness. This is the other half of spec §4.1: 'the data exists in two places and the second copy has been verified by file count and hash'. Until this field existed the only destination-side evidence in the harness was `if exist E:\\auros-archive\\COMPLETE` — a marker written by the thing under test — and '100/100 clean migrations' was fully compatible with 18,000 files of total destination data loss.",
+      "properties": {
+        "label": { "enum": ["source", "archive"] },
+        "manifest_sha256": { "type": "string" },
+        "expected_files": { "type": "integer" },
+        "present_files": { "type": "integer" },
+        "present_bytes": {
+          "type": "integer",
+          "description": "Summed logical size of the archive files that were found. On an aborted run the archive is legitimately partial, so this is the number that says whether the installer was copying at all."
+        },
+        "hash_matches": { "type": "integer" },
+        "missing": { "type": "array", "items": { "type": "string" } },
+        "corrupt": { "type": "array", "items": { "type": "string" } },
+        "size_mismatch": { "type": "array", "items": { "type": "string" } },
+        "unreadable": { "type": "array", "items": { "type": "string" } },
+        "allowed_deviations": { "type": "array", "items": { "type": "string" } },
+        "clean": { "type": "boolean" },
+        "reported": {
+          "type": "boolean",
+          "description": "False means the destination was never measured. That is a failed run (P8): an unmeasured destination is how a harness convinces itself that an installer which wrote nothing was interrupted while writing."
         }
       }
     },
@@ -160,13 +225,13 @@
     "checks": {
       "type": "array",
       "minItems": 1,
-      "description": "P0..P7. There is no 'skip' status: a check that did not run is a check that failed. Half the ways a test suite stops testing anything begin with a skip that looked reasonable.",
+      "description": "P0..P9, plus E-codes for a run that could not finish. There is no 'skip' status: a check that did not run is a check that failed. `runner report` additionally requires every postcondition ID applicable to the run's kind to be PRESENT — a checks array that simply omits P2/P3/P4 is otherwise indistinguishable from one where they passed.",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "name", "status"],
         "properties": {
-          "id": { "type": "string", "pattern": "^(P[0-9]+|SCHEMA)$" },
+          "id": { "type": "string", "pattern": "^(P[0-9]+|E[0-9]+|SCHEMA|MISSING|SUITE)$" },
           "name": { "type": "string" },
           "status": { "enum": ["pass", "fail"] },
           "detail": { "type": "string" }

@@ -154,6 +154,17 @@ type Config struct {
 	// clean suite actually exercises. It is a required field because the alternative is a report that
 	// says "100 successful migrations" while the runs stopped at phase 5.
 	InstallerScope string `json:"installer_scope"`
+
+	// MaxOvershootBytes bounds how far past its pin a fault may fire and still count as having fired
+	// at that pin. Zero means fault.DefaultMaxOvershootBytes. See fault.FireRecord.Valid.
+	MaxOvershootBytes int64 `json:"max_overshoot_bytes"`
+}
+
+func (c *Config) maxOvershoot() int64 {
+	if c.MaxOvershootBytes <= 0 {
+		return fault.DefaultMaxOvershootBytes
+	}
+	return c.MaxOvershootBytes
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -196,16 +207,50 @@ type Artifact struct {
 	Bytes  int64  `json:"bytes"`
 }
 
+// InstallerOutcome is how the run ended.
+//
+// There used to be one boolean, `killed_by_harness`, covering two things that are opposites: a power cut
+// we induced on purpose, and the harness giving up on a guest that hung. Postcondition P1 read it as
+// "the installer aborted", so an installer with no abort path at all — one that deadlocks on the ENOSPC,
+// blocks on the yanked USB, spins on the locked file, and never exits — scored a clean abort on every
+// abort scenario in the suite. The conflation is gone rather than guarded: there is no longer a field
+// that can mean both.
 type InstallerOutcome struct {
-	ExitCode     int    `json:"exit_code"`
-	ExitReported bool   `json:"exit_reported"`
-	Killed       bool   `json:"killed_by_harness"`
+	ExitCode     int  `json:"exit_code"`
+	ExitReported bool `json:"exit_reported"`
+
+	// KilledByPowerCut: the run ended in an INDUCED power cut. Expected, and it is what an abort looks
+	// like for F01-F04. There is no exit code and there never will be.
+	KilledByPowerCut bool `json:"killed_by_power_cut"`
+
+	// KilledByTimeout: the guest never powered off and the harness killed it. Never expected, never an
+	// abort, always a failing run — postcondition P9.
+	KilledByTimeout bool   `json:"killed_by_run_timeout"`
+	TimeoutNote     string `json:"run_timeout_note,omitempty"`
+
 	PhaseReached string `json:"phase_reached,omitempty"`
 }
 
+func (o InstallerOutcome) describe() string {
+	return fmt.Sprintf("exit_reported=%v exit=%d power_cut=%v run_timeout=%v",
+		o.ExitReported, o.ExitCode, o.KilledByPowerCut, o.KilledByTimeout)
+}
+
+// CorpusVerify is one `gen verify` result. The SAME shape is used for the source corpus on C: and for
+// the archive the installer materialised on the destination; Label says which, and it is carried out of
+// the guest rather than inferred from the order the two blocks arrived in.
 type CorpusVerify struct {
+	Label string `json:"label"`
+
+	// ManifestSHA is the SHA-256 of the manifest the GUEST verified against. Compared to the suite's
+	// corpus digest by postcondition P4: `gen verify` has always emitted it, and the runner used to
+	// have nowhere to put it, so a guest verifying against a twelve-entry manifest reported 12/12
+	// clean and nothing in the harness noticed that it was not the manifest the pins came from.
+	ManifestSHA string `json:"manifest_sha256"`
+
 	Expected     int      `json:"expected_files"`
 	Present      int      `json:"present_files"`
+	PresentBytes int64    `json:"present_bytes"`
 	HashMatches  int      `json:"hash_matches"`
 	Missing      []string `json:"missing,omitempty"`
 	Corrupt      []string `json:"corrupt,omitempty"`
@@ -228,10 +273,19 @@ type RunResult struct {
 
 	BaseSystemSHA string `json:"base_system_sha256"`
 	BaseDestSHA   string `json:"base_dest_sha256"`
-	CorpusDigest  string `json:"corpus_digest"`
-	CorpusProfile string `json:"corpus_profile"`
-	CorpusSeed    uint64 `json:"corpus_seed"`
-	CorpusFiles   int    `json:"corpus_files"`
+	CorpusDigest   string `json:"corpus_digest"`
+	CorpusProfile  string `json:"corpus_profile"`
+	CorpusSeed     uint64 `json:"corpus_seed"`
+	CorpusFiles    int    `json:"corpus_files"`
+	CorpusFaithful bool   `json:"corpus_faithful"`
+
+	// Provenance, recorded at RUN time from the config this run used. `runner report` reads the header
+	// of the published evidence out of these fields and requires every run to agree, instead of
+	// reprinting the config file as it reads at report time — which said nothing about the runs and
+	// could be edited afterwards without touching a single result.
+	WindowsEdition string `json:"windows_edition"`
+	ISOSource      string `json:"iso_source"`
+	InstallerScope string `json:"installer_scope"`
 
 	StartedAt  string `json:"started_at"`
 	FinishedAt string `json:"finished_at"`
@@ -241,8 +295,16 @@ type RunResult struct {
 	Fire *fault.FireRecord `json:"fire,omitempty"`
 
 	Installer InstallerOutcome `json:"installer"`
-	Corpus    CorpusVerify     `json:"corpus_verify"`
-	BootCheck *BootCheck       `json:"boot_check"`
+
+	// Corpus is the SOURCE re-hashed after the run: "the installer did not damage the original".
+	Corpus CorpusVerify `json:"corpus_verify"`
+
+	// Archive is the DESTINATION tree re-hashed after the run: "the second copy exists and matches".
+	// Spec §4.1 requires both, and this half used to be represented in the entire harness by a single
+	// `if exist E:\auros-archive\COMPLETE` — a marker written by the thing under test.
+	Archive CorpusVerify `json:"archive_verify"`
+
+	BootCheck *BootCheck `json:"boot_check"`
 
 	Checks    []Check    `json:"checks"`
 	Artifacts []Artifact `json:"artifacts"`
@@ -252,6 +314,11 @@ type RunResult struct {
 	Verdict string `json:"verdict"`
 
 	Notes []string `json:"notes,omitempty"`
+
+	// sourcePath is where this result was read from. Not serialised: it is a fact about the reader,
+	// not about the run. The report needs it because the published "Result digest" column has to be
+	// the SHA-256 of the bytes on disk, not of a second serialisation of this struct.
+	sourcePath string
 }
 
 func (r *RunResult) check(id, name string, ok bool, detail string) {
@@ -462,9 +529,24 @@ func cmdDoctor(args []string) error {
 
 	fmt.Println("base images (built once, never written to again)")
 	note(AssertBaseUnchanged(cfg.Base.SystemImage, cfg.Base.SystemSHA256) == nil,
-		"windows base image hashes to "+cfg.Base.SystemSHA256)
+		"windows base image is read-only and hashes to "+cfg.Base.SystemSHA256)
 	note(AssertBaseUnchanged(cfg.Base.DestImage, cfg.Base.DestSHA256) == nil,
-		"destination base image hashes to "+cfg.Base.DestSHA256)
+		"destination base image is read-only and hashes to "+cfg.Base.DestSHA256)
+
+	fmt.Println("§4.7 harness token")
+	// The token names the volume serials every guest tool refuses to start without. A suite that starts
+	// with either of them empty mints a token no guest tool can accept, and the refusal arrives inside
+	// the VM where it costs a whole run to discover. Doctor is the place to find out.
+	note(cfg.Base.SystemVolumeSerial != "",
+		"base.system_volume_serial is set: the corpus volume the token vouches for")
+	note(cfg.Base.DestVolumeSerial != "",
+		"base.dest_volume_serial is set: the destination volume the token vouches for")
+	note(cfg.Base.SystemVolumeSerial == "" || cfg.Base.DestVolumeSerial == "" ||
+		!strings.EqualFold(cfg.Base.SystemVolumeSerial, cfg.Base.DestVolumeSerial),
+		"the corpus and destination volume serials differ: a harness that blurs the two cannot "+
+			"demonstrate that the installer keeps them apart")
+
+	fmt.Println("corpus")
 	note(cfg.Base.CorpusFaithful,
 		"the corpus baked into the base image was generated on Windows (faithful=true). An unfaithful "+
 			"corpus has no read-only bits, no alternate data streams and no offline attributes, and a "+
@@ -599,11 +681,18 @@ func cmdRun(args []string) error {
 }
 
 func cmdDoctorQuiet(cfg *Config) error {
-	if err := AssertBaseUnchanged(cfg.Base.SystemImage, cfg.Base.SystemSHA256); err != nil {
+	if err := AssertBasesUnchanged(cfg); err != nil {
 		return err
 	}
-	if err := AssertBaseUnchanged(cfg.Base.DestImage, cfg.Base.DestSHA256); err != nil {
-		return err
+	if cfg.Base.SystemVolumeSerial == "" || cfg.Base.DestVolumeSerial == "" {
+		return errors.New("base.system_volume_serial and base.dest_volume_serial must both be set: the " +
+			"§4.7 harness token names them, every guest tool refuses to start without a match, and a " +
+			"suite started with either one empty mints a token nothing in the guest can accept")
+	}
+	if strings.EqualFold(cfg.Base.SystemVolumeSerial, cfg.Base.DestVolumeSerial) {
+		return errors.New("base.system_volume_serial and base.dest_volume_serial are the same volume: " +
+			"SAFETY.md phase 3 requires a destination that is not the system disk, and a harness that " +
+			"blurs the two cannot prove the installer keeps them apart")
 	}
 	if !cfg.Base.CorpusFaithful {
 		return errors.New("base.corpus_faithful is false: the corpus in the base image was generated on a " +

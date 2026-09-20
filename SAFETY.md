@@ -103,10 +103,22 @@ Takes a `VerifiedArchive`. In order:
    On TPM 1.2 — common across 2012–2015 — changing firmware boot order triggers a recovery-key prompt.
    Stranding a user at a recovery prompt **on the abort path** is the worst outcome this tool can produce,
    so this is unconditional, not an option.
-2. Write the boot medium.
-3. Set one-time boot, preferring `BootNext`, falling back to `shutdown /r /fw` (send the user to the
+2. Set one-time boot, preferring `BootNext`, falling back to `shutdown /r /fw` (send the user to the
    firmware menu with instructions) because `BootNext` is not honoured reliably across vendors.
-4. Restart.
+3. Restart.
+
+**We do not write the boot medium. D13.** An earlier version of this section had "write the boot medium"
+as step 2, carried over from SPEC §6C.5. D13 removed it from the product: writing boot media means an
+elevated raw handle to a physical drive, a dismount of every child volume, a hand-rolled GPT and ESP, and
+sector-aligned raw writes — irreversibly destructive, on a machine we do not own, with no undo. The media
+is produced elsewhere by a machine with the tools for it, and this tool at most points the firmware at a
+stick the user already made.
+
+That deletion is why this file exists as a separate contract rather than as a restatement of the spec.
+`auros-web/src/content/migration/20-files.md` tells the customer, in as many words, that *the Windows
+program does not write your USB stick*. A safety contract that still listed the write as a step would
+mean the code was written against one promise and the customer bought a different one, and the one the
+customer read is the one that matters.
 
 **Every step is individually reversible, and the reversal is tested more than the action.**
 

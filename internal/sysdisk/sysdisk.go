@@ -47,6 +47,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -65,7 +66,49 @@ var (
 	// ErrNotCommitted is returned when Execute is called outside commit mode.
 	// Defence in depth: safety.Arm already refuses, and so does this.
 	ErrNotCommitted = errors.New("sysdisk: refusing to execute outside commit mode")
+
+	// ErrBadMount is returned for a mount point that cannot be a single command
+	// argument. A volume mounted at "C:\Program Files\Data" split on spaces
+	// hands manage-bde "-disable C:\Program" and a stray "Files\Data", in the
+	// middle of the one phase allowed to change the machine.
+	ErrBadMount = errors.New("sysdisk: system mount point contains whitespace or quotes")
 )
+
+// BitLocker is the phase 1 finding about the system volume, as a tri-state.
+//
+// It is not a bool, and the zero value is not "off". A 2014 school laptop with
+// TPM 1.2 is the machine this whole step exists for, and "we could not tell"
+// must behave like "yes, it is on" — suspending BitLocker on a machine that is
+// not using it is a no-op, while failing to suspend it on a machine that is
+// leaves a user at a recovery prompt nobody has the key for. The asymmetry is
+// total, so the default is total too.
+type BitLocker int
+
+const (
+	// BitLockerUnknown is the zero value and is treated as PROTECTED.
+	BitLockerUnknown BitLocker = iota
+	// BitLockerOn means phase 1 established that BitLocker protects the system
+	// volume.
+	BitLockerOn
+	// BitLockerOff means phase 1 established that it does not. This is the ONLY
+	// value that omits the suspend step.
+	BitLockerOff
+)
+
+func (b BitLocker) String() string {
+	switch b {
+	case BitLockerOn:
+		return "on"
+	case BitLockerOff:
+		return "off"
+	default:
+		return "unknown (treated as on)"
+	}
+}
+
+// SuspendNeeded reports whether the suspend step must be planned. It is written
+// as "not positively off" rather than "on" on purpose.
+func (b BitLocker) SuspendNeeded() bool { return b != BitLockerOff }
 
 // Intent is a fully-resolved description of what crossing the wall will do. It
 // is a plain value with no behaviour, so it can be printed, logged and shown to
@@ -78,8 +121,9 @@ type Intent struct {
 	// argument. Display only: identity is the GUID.
 	SystemMount string
 
-	// BitLockerProtected is the phase 1 finding. When true, step 1 runs.
-	BitLockerProtected bool
+	// BitLocker is the phase 1 finding. The suspend step runs unless this is
+	// positively BitLockerOff.
+	BitLocker BitLocker
 
 	// BootMediaGUID is the firmware boot entry for media THE USER ALREADY MADE
 	// (D13). Empty means we do not touch the boot order at all and send the user
@@ -98,19 +142,50 @@ type Intent struct {
 // requires every step to be individually reversible and the reversal to be
 // tested more than the action, so the reversal is carried alongside the action
 // and is what the abort path runs.
+//
+// The action is an ARGUMENT VECTOR, not a command line. The string shown in dry
+// run is rendered from the argv, so what the user reads is derived from what the
+// machine runs rather than re-parsed into it. Nothing anywhere splits a command
+// string on spaces.
 type Step struct {
-	ID          string
-	Description string
-	Command     string // exactly what would run, for the user and the run log
-	Reversal    string // exactly what undoes it
-	Destructive bool
+	ID           string
+	Description  string
+	Argv         []string // exactly what runs
+	ReversalArgv []string // exactly what undoes it
+	Note         string   // human aside shown after the reversal, never executed
+	Destructive  bool
+}
+
+// Command renders Argv for display and for the run log.
+func (s Step) Command() string { return renderArgv(s.Argv) }
+
+// Reversal renders ReversalArgv for display, with its human note appended.
+func (s Step) Reversal() string {
+	r := renderArgv(s.ReversalArgv)
+	if s.Note != "" {
+		r += "   (" + s.Note + ")"
+	}
+	return r
+}
+
+// renderArgv quotes any argument that needs it, so a mount point with a space in
+// it is displayed as one argument because it IS one argument.
+func renderArgv(argv []string) string {
+	parts := make([]string, 0, len(argv))
+	for _, a := range argv {
+		if a == "" || strings.ContainsAny(a, " \t\"") {
+			a = strconv.Quote(a)
+		}
+		parts = append(parts, a)
+	}
+	return strings.Join(parts, " ")
 }
 
 // Steps computes the plan. It is pure: no I/O, no side effects, no privileges.
 // Dry-run mode prints precisely this and performs none of it.
 func (i Intent) Steps() []Step {
 	var steps []Step
-	if i.BitLockerProtected {
+	if i.BitLocker.SuspendNeeded() {
 		mount := i.SystemMount
 		if mount == "" {
 			mount = "C:"
@@ -118,19 +193,20 @@ func (i Intent) Steps() []Step {
 		steps = append(steps, Step{
 			ID: "bitlocker-suspend",
 			Description: "Suspend BitLocker for exactly one boot, so changing the boot order " +
-				"does not strand you at a recovery-key prompt (TPM 1.2 machines).",
-			Command:     fmt.Sprintf(`manage-bde -protectors -disable %s -RebootCount 1`, mount),
-			Reversal:    fmt.Sprintf(`manage-bde -protectors -enable %s`, mount),
-			Destructive: false,
+				"does not strand you at a recovery-key prompt (TPM 1.2 machines). " +
+				"Planned whenever BitLocker is not known to be off, including when it could not be checked.",
+			Argv:         []string{"manage-bde", "-protectors", "-disable", mount, "-RebootCount", "1"},
+			ReversalArgv: []string{"manage-bde", "-protectors", "-enable", mount},
+			Destructive:  false,
 		})
 	}
 	if i.BootMediaGUID != "" {
 		steps = append(steps, Step{
-			ID:          "boot-sequence",
-			Description: "Set a ONE-TIME next boot to the install media you already made. The saved boot order is not changed.",
-			Command:     fmt.Sprintf(`bcdedit /set {fwbootmgr} bootsequence %s`, i.BootMediaGUID),
-			Reversal:    `bcdedit /deletevalue {fwbootmgr} bootsequence`,
-			Destructive: false,
+			ID:           "boot-sequence",
+			Description:  "Set a ONE-TIME next boot to the install media you already made. The saved boot order is not changed.",
+			Argv:         []string{"bcdedit", "/set", "{fwbootmgr}", "bootsequence", i.BootMediaGUID},
+			ReversalArgv: []string{"bcdedit", "/deletevalue", "{fwbootmgr}", "bootsequence"},
+			Destructive:  false,
 		})
 	} else {
 		steps = append(steps, Step{
@@ -138,18 +214,20 @@ func (i Intent) Steps() []Step {
 			Description: "No boot entry was given, so the next boot goes to the firmware menu and " +
 				"you pick the USB stick yourself. This is the reliable path: BootNext is not " +
 				"honoured by every vendor's firmware.",
-			Command:     `shutdown /r /fw /t 0`,
-			Reversal:    `shutdown /a   (cancels a pending restart)`,
-			Destructive: false,
+			Argv:         []string{"shutdown", "/r", "/fw", "/t", "0"},
+			ReversalArgv: []string{"shutdown", "/a"},
+			Note:         "cancels a pending restart",
+			Destructive:  false,
 		})
 	}
 	if i.Restart {
 		steps = append(steps, Step{
-			ID:          "restart",
-			Description: "Restart the machine.",
-			Command:     `shutdown /r /t 0`,
-			Reversal:    `shutdown /a   (only before the restart begins)`,
-			Destructive: false,
+			ID:           "restart",
+			Description:  "Restart the machine.",
+			Argv:         []string{"shutdown", "/r", "/t", "0"},
+			ReversalArgv: []string{"shutdown", "/a"},
+			Note:         "only before the restart begins",
+			Destructive:  false,
 		})
 	}
 	return steps
@@ -160,7 +238,7 @@ func (i Intent) Describe() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "system volume : %s\n", i.SystemVolumeGUID)
 	fmt.Fprintf(&b, "mounted at    : %s\n", i.SystemMount)
-	fmt.Fprintf(&b, "BitLocker     : %v\n", i.BitLockerProtected)
+	fmt.Fprintf(&b, "BitLocker     : %s\n", i.BitLocker)
 	if i.BootMediaGUID == "" {
 		b.WriteString("boot media    : none given; firmware-menu fallback\n")
 	} else {
@@ -168,7 +246,7 @@ func (i Intent) Describe() string {
 	}
 	b.WriteString("\nsteps:\n")
 	for n, s := range i.Steps() {
-		fmt.Fprintf(&b, "  %d. %s\n     run:  %s\n     undo: %s\n", n+1, s.Description, s.Command, s.Reversal)
+		fmt.Fprintf(&b, "  %d. %s\n     run:  %s\n     undo: %s\n", n+1, s.Description, s.Command(), s.Reversal())
 	}
 	return b.String()
 }
@@ -177,6 +255,9 @@ func (i Intent) Describe() string {
 func (i Intent) Validate() error {
 	if i.SystemVolumeGUID == "" {
 		return ErrNoSystemVolume
+	}
+	if strings.ContainsAny(i.SystemMount, " \t\r\n\"'") {
+		return fmt.Errorf("%w: %q", ErrBadMount, i.SystemMount)
 	}
 	if !i.Commit {
 		return ErrNotCommitted

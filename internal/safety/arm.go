@@ -12,6 +12,7 @@ import (
 	"github.com/aarohkandy/auros-installer/internal/runlog"
 	"github.com/aarohkandy/auros-installer/internal/sysdisk"
 	"github.com/aarohkandy/auros-installer/internal/verify"
+	"github.com/aarohkandy/auros-installer/internal/winenv"
 )
 
 // This file contains the two sides of the wall.
@@ -39,17 +40,38 @@ var (
 
 	// ErrEmptyArchive means the manifest has no files. Arming on the strength of
 	// a verification that verified nothing is the failure mode this catches.
+	// There is no flag that turns it off: see verifyOption.
 	ErrEmptyArchive = errors.New("safety: refusing to issue a VerifiedArchive for an empty manifest")
+
+	// ErrWrongVolume means the steps about to run are aimed at a volume other
+	// than the one the archive was verified against. The proof and the target
+	// must be the same machine's system disk or the proof is about something
+	// else.
+	ErrWrongVolume = errors.New("safety: refusing to arm: the plan targets a volume the archive did not verify against")
+
+	// ErrFirmwareUnknown means the run never established the firmware facts
+	// SAFETY.md phase 1 requires. Arming on facts the tool admits it did not
+	// check is arming blind, and the specific blindness that matters is
+	// BitLocker: the suspend step exists to stop a TPM 1.2 machine landing at a
+	// recovery prompt nobody has the key for.
+	ErrFirmwareUnknown = errors.New("safety: refusing to arm: the firmware facts were never established (SAFETY.md phase 1)")
+
+	// ErrBadSystemMount means the mount point carries whitespace or quotes and
+	// cannot be rendered into a command line unambiguously.
+	ErrBadSystemMount = errors.New("safety: refusing to arm: the system mount point is not a usable argument")
 )
 
 // VerifyRequest is the input to phase 5.
 type VerifyRequest struct {
-	// DestRoot is the archive root on the destination volume.
-	DestRoot string
-	// DestVolumeGUID identifies the destination volume.
-	DestVolumeGUID string
-	// SystemVolumeGUID identifies the volume we must not have written to.
-	SystemVolumeGUID string
+	// Dest is the destination, as PROVEN by a Resolver. It is not a path and a
+	// GUID the caller supplies separately — those two can disagree, and a run
+	// where they disagree is a run that verifies the system disk against itself
+	// and calls it a second copy. A Destination carries a resolved path and the
+	// identity of the volume that really holds it, and it cannot be constructed
+	// outside this package.
+	Dest Destination
+	// System is the volume we must not have written to.
+	System winenv.Volume
 	// Manifest is what phase 4 says it wrote.
 	Manifest *manifest.Manifest
 	// Quarantine holds everything phase 4 could not copy. Phase 5 adds to it.
@@ -60,11 +82,23 @@ type VerifyRequest struct {
 	BufSize  int
 	Progress func(done, total int)
 	Clock    func() time.Time
-	// AllowEmpty permits a zero-file archive. It exists for tests of the
-	// machinery itself; a real run with nothing to copy has nothing to protect
-	// and should not be arming anything.
-	AllowEmpty bool
+
+	// allowEmpty permits a zero-file archive. It is UNEXPORTED and settable only
+	// through an unexported option inside this package, because it is the off
+	// switch for ErrEmptyArchive and an exported off switch is not a rule. The
+	// same technique copyengine uses for its hookDst.
+	allowEmpty bool
 }
+
+// verifyOption is the in-package-only way to reach the unexported fields of a
+// VerifyRequest. There is deliberately no exported option type: a caller in
+// another package cannot name these, cannot set them, and cannot turn off a
+// refusal.
+type verifyOption func(*VerifyRequest)
+
+// withAllowEmpty exists for tests of the machinery itself. A real run with
+// nothing to copy has nothing to protect and must not arm anything.
+func withAllowEmpty() verifyOption { return func(r *VerifyRequest) { r.allowEmpty = true } }
 
 // Verify performs SAFETY.md phase 5 and, on complete success, issues the
 // VerifiedArchive.
@@ -84,9 +118,12 @@ type VerifyRequest struct {
 // On every one of those paths the system disk is untouched, because the code
 // that can touch it is on the other side of a value this function did not
 // return.
-func Verify(ctx context.Context, m *Machine, req VerifyRequest) (VerifiedArchive, *verify.Report, error) {
+func Verify(ctx context.Context, m *Machine, req VerifyRequest, opts ...verifyOption) (VerifiedArchive, *verify.Report, error) {
 	if m == nil {
 		return VerifiedArchive{}, nil, errors.New("safety: no state machine")
+	}
+	for _, o := range opts {
+		o(&req)
 	}
 	if err := m.Advance(PhaseVerify); err != nil {
 		return VerifiedArchive{}, nil, err
@@ -106,7 +143,7 @@ func Verify(ctx context.Context, m *Machine, req VerifyRequest) (VerifiedArchive
 	if req.Manifest == nil {
 		return VerifiedArchive{}, nil, errors.New("safety: no manifest to verify against")
 	}
-	if req.Manifest.Len() == 0 && !req.AllowEmpty {
+	if req.Manifest.Len() == 0 && !req.allowEmpty {
 		logf("refused", runlog.Fields{"reason": "empty-manifest"})
 		return VerifiedArchive{}, nil, ErrEmptyArchive
 	}
@@ -115,7 +152,21 @@ func Verify(ctx context.Context, m *Machine, req VerifyRequest) (VerifiedArchive
 	// this; checking again here is deliberate. This is the function that mints
 	// the proof, and a proof should not depend on an earlier function having
 	// been called correctly.
-	dg, sg := normalizeGUID(req.DestVolumeGUID), normalizeGUID(req.SystemVolumeGUID)
+	//
+	// "Again" means again from the disk, not again from the same two strings:
+	// Reassert re-resolves the destination path and re-asks the operating system
+	// which volume holds it. A junction swapped in after phase 3 changes the
+	// answer here, and the run stops with no proof minted.
+	if !req.Dest.Resolved() {
+		logf("refused", runlog.Fields{"reason": "destination-not-resolved"})
+		return VerifiedArchive{}, nil, ErrDestinationNotResolved
+	}
+	if err := req.Dest.Reassert(); err != nil {
+		logf("refused", runlog.Fields{"reason": "destination-identity-changed", "error": err.Error()})
+		return VerifiedArchive{}, nil, err
+	}
+	destRoot := req.Dest.Dir()
+	dg, sg := normalizeGUID(req.Dest.Volume().GUID), normalizeGUID(req.System.GUID)
 	if dg == "" || sg == "" {
 		logf("refused", runlog.Fields{"reason": "volume-identity-unknown", "dest": dg, "system": sg})
 		return VerifiedArchive{}, nil, ErrDestinationUnidentified
@@ -126,7 +177,7 @@ func Verify(ctx context.Context, m *Machine, req VerifyRequest) (VerifiedArchive
 	}
 
 	rep, err := verify.Run(ctx, verify.Options{
-		DestRoot:   req.DestRoot,
+		DestRoot:   destRoot,
 		Manifest:   req.Manifest,
 		Quarantine: req.Quarantine,
 		BufSize:    req.BufSize,
@@ -159,9 +210,10 @@ func Verify(ctx context.Context, m *Machine, req VerifyRequest) (VerifiedArchive
 	va := VerifiedArchive{
 		valid:            true, // the only place in the program this is set
 		runID:            m.RunID(),
-		destRoot:         req.DestRoot,
-		destVolumeGUID:   req.DestVolumeGUID,
-		systemVolumeGUID: req.SystemVolumeGUID,
+		destRoot:         destRoot,
+		destVolumeGUID:   req.Dest.Volume().GUID,
+		systemVolumeGUID: req.System.GUID,
+		systemMount:      req.System.Mount,
 		manifestDigest:   req.Manifest.Digest(),
 		fileCount:        req.Manifest.Len(),
 		totalBytes:       req.Manifest.TotalBytes(),
@@ -175,9 +227,10 @@ func Verify(ctx context.Context, m *Machine, req VerifyRequest) (VerifiedArchive
 		"total_bytes":           va.totalBytes,
 		"manifest_digest":       va.manifestDigest,
 		"dest_volume":           va.destVolumeGUID,
+		"dest_root":             va.destRoot,
 		"system_volume":         va.systemVolumeGUID,
-		"system_disk_untouched": true,
-		"note":                  "the data now exists in two places and the system disk has not been written to",
+		"system_disk_untouched": !req.Dest.OnSystemVolume(),
+		"note":                  "the data now exists in two places; system_disk_untouched above is measured, not asserted",
 	})
 	return va, rep, nil
 }
@@ -188,17 +241,30 @@ func Verify(ctx context.Context, m *Machine, req VerifyRequest) (VerifiedArchive
 type Step struct {
 	ID          string
 	Description string
-	Command     string
-	Reversal    string
+	// Argv is exactly what runs, already split. Command below is rendered FROM
+	// Argv for display, so the string the user reads cannot drift from the
+	// argument vector the machine executes.
+	Argv         []string
+	ReversalArgv []string
+	Command      string
+	Reversal     string
 }
 
 // ArmRequest describes what crossing the wall will do. It deliberately has no
 // "commit" field: the mode comes from the Machine, which took it at
 // construction and has no setter.
 type ArmRequest struct {
-	SystemVolumeGUID   string
-	SystemMount        string
-	BitLockerProtected bool
+	// BitLocker is the phase 1 finding, as a tri-state. It is NOT a bool:
+	// collapsing "we did not check" into "no" is how a TPM 1.2 laptop reaches a
+	// recovery prompt with nobody holding the key. Unknown is the zero value and
+	// is treated as PROTECTED, so a caller that forgets this field gets the
+	// safe behaviour rather than the dangerous one.
+	BitLocker winenv.TriState
+
+	// FirmwareKnown records whether phase 1 actually established the firmware
+	// facts. Commit mode refuses without it (ErrFirmwareUnknown).
+	FirmwareKnown bool
+
 	// BootMediaGUID is a firmware boot entry for media THE USER ALREADY MADE.
 	// DECISIONS.md D13: this tool does not write boot media. Empty means the
 	// firmware-menu path, which is a first-class route, not an error case.
@@ -222,7 +288,7 @@ func (r *ArmResult) Describe() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "mode: %s\n", r.Mode)
 	if !r.Performed {
-		b.WriteString("nothing was written to the system disk.\n")
+		b.WriteString("no step below was performed; nothing on this machine was changed.\n")
 		b.WriteString("this is what --commit would do:\n")
 	} else {
 		b.WriteString("performed:\n")
@@ -252,7 +318,7 @@ func (r *ArmResult) Describe() string {
 // Even in commit mode, the privileged implementation is compiled out unless the
 // binary was built with `-tags auros_arm_enabled`, which no CI build and no
 // ordinary `go build` sets. See internal/sysdisk.
-func Arm(ctx context.Context, m *Machine, va VerifiedArchive, req ArmRequest) (*ArmResult, error) {
+func Arm(ctx context.Context, m *Machine, va VerifiedArchive, req ArmRequest) (res *ArmResult, err error) {
 	if m == nil {
 		return nil, errors.New("safety: no state machine")
 	}
@@ -262,17 +328,6 @@ func Arm(ctx context.Context, m *Machine, va VerifiedArchive, req ArmRequest) (*
 		return nil, ErrNotVerified
 	}
 
-	intent := sysdisk.Intent{
-		SystemVolumeGUID:   req.SystemVolumeGUID,
-		SystemMount:        req.SystemMount,
-		BitLockerProtected: req.BitLockerProtected,
-		BootMediaGUID:      req.BootMediaGUID,
-		Restart:            req.Restart,
-		Commit:             m.Mode().Commits(),
-	}
-	steps := toSteps(intent.Steps())
-	res := &ArmResult{Mode: m.Mode(), Steps: steps}
-
 	logf := func(kind string, f runlog.Fields) {
 		if req.Log != nil {
 			f["run_id"] = m.RunID()
@@ -281,6 +336,53 @@ func Arm(ctx context.Context, m *Machine, va VerifiedArchive, req ArmRequest) (*
 		}
 	}
 
+	// The volume the steps will act on comes from the PROOF, not from the
+	// caller. There is no field on ArmRequest that names a volume, so there is
+	// no way to hand Arm a genuine archive and aim it at a different disk — in
+	// particular at the disk holding the only second copy. What Verify checked
+	// and what Arm changes are the same value by construction.
+	systemGUID := normalizeGUID(va.systemVolumeGUID)
+	if systemGUID == "" {
+		return nil, ErrWrongVolume
+	}
+	if systemGUID == normalizeGUID(va.destVolumeGUID) {
+		logf("refused", runlog.Fields{"reason": "archive-on-system-volume", "volume": systemGUID})
+		return nil, ErrArchiveOnSystemVolume
+	}
+	if err := validMount(va.systemMount); err != nil {
+		return nil, err
+	}
+
+	// SAFETY.md phase 1 requires all three firmware facts to be detected and
+	// stated before the run begins. Crossing the wall on facts the tool never
+	// checked is the failure this refuses; the BitLocker suspend step below is
+	// generated whenever BitLocker is not positively known to be OFF, so a dry
+	// run still shows the user what would happen.
+	if m.Mode().Commits() && !req.FirmwareKnown {
+		logf("refused", runlog.Fields{
+			"reason":                "firmware-facts-unknown",
+			"system_disk_untouched": true,
+		})
+		return nil, ErrFirmwareUnknown
+	}
+
+	intent := sysdisk.Intent{
+		SystemVolumeGUID: va.systemVolumeGUID,
+		SystemMount:      va.systemMount,
+		BitLocker:        bitLockerState(req.BitLocker),
+		BootMediaGUID:    req.BootMediaGUID,
+		Restart:          req.Restart,
+		Commit:           m.Mode().Commits(),
+	}
+	// A last assertion that the plan is aimed where the proof looked. It is
+	// trivially true today; it is here so that it stops being trivially true the
+	// moment somebody reintroduces a caller-supplied target.
+	if normalizeGUID(intent.SystemVolumeGUID) != systemGUID {
+		return nil, ErrWrongVolume
+	}
+	steps := toSteps(intent.Steps())
+	res = &ArmResult{Mode: m.Mode(), Steps: steps}
+
 	if !m.Mode().Commits() {
 		// Dry run. Reach the wall, record it, cross nothing.
 		if err := m.DryRunWall(va); err != nil {
@@ -288,6 +390,8 @@ func Arm(ctx context.Context, m *Machine, va VerifiedArchive, req ArmRequest) (*
 		}
 		logf("dry-run-plan", runlog.Fields{
 			"steps":                 len(steps),
+			"firmware_known":        req.FirmwareKnown,
+			"bitlocker":             req.BitLocker.String(),
 			"system_disk_untouched": true,
 		})
 		return res, nil
@@ -298,28 +402,77 @@ func Arm(ctx context.Context, m *Machine, va VerifiedArchive, req ArmRequest) (*
 		return nil, err
 	}
 
-	logf("executing", runlog.Fields{"steps": len(steps), "system_volume": req.SystemVolumeGUID})
-	out, err := sysdisk.Execute(ctx, intent)
+	// From here the machine records the wall as crossed, so a panic must not
+	// leave the run with no record of what had already been done. sysdisk
+	// unwinds the steps themselves; this makes sure the run log says so.
+	defer func() {
+		if r := recover(); r != nil {
+			logf("panicked", runlog.Fields{
+				"panic":     fmt.Sprint(r),
+				"completed": strings.Join(res.Completed, ","),
+				"reversed":  strings.Join(res.Reversed, ","),
+			})
+			panic(r)
+		}
+	}()
+
+	logf("executing", runlog.Fields{"steps": len(steps), "system_volume": va.systemVolumeGUID})
+	out, eerr := sysdisk.Execute(ctx, intent)
 	if out != nil {
 		res.Completed, res.Failed, res.Reversed = out.Completed, out.Failed, out.Reversed
 	}
-	res.Performed = err == nil
-	if err != nil {
+	res.Performed = eerr == nil
+	if eerr != nil {
 		logf("failed", runlog.Fields{
-			"error":     err.Error(),
+			"error":     eerr.Error(),
 			"completed": strings.Join(res.Completed, ","),
 			"reversed":  strings.Join(res.Reversed, ","),
 		})
-		return res, err
+		return res, eerr
 	}
 	logf("armed", runlog.Fields{"completed": strings.Join(res.Completed, ",")})
 	return res, nil
 }
 
+// bitLockerState maps phase 1's tri-state onto the one sysdisk plans against.
+// Unknown maps to Unknown, which sysdisk treats as protected. The mapping is
+// total and has no default-to-false branch anywhere in it.
+func bitLockerState(t winenv.TriState) sysdisk.BitLocker {
+	switch t {
+	case winenv.Yes:
+		return sysdisk.BitLockerOn
+	case winenv.No:
+		return sysdisk.BitLockerOff
+	default:
+		return sysdisk.BitLockerUnknown
+	}
+}
+
+// validMount refuses a mount point that cannot be rendered into a command line
+// unambiguously. A volume mounted at "C:\Program Files\Data" is exactly the
+// mount-point case SAFETY.md phase 3 warns about, and it must not turn into two
+// arguments halfway through the one phase that changes the machine.
+func validMount(mount string) error {
+	if mount == "" {
+		return nil // sysdisk substitutes C: and says so
+	}
+	if strings.ContainsAny(mount, " \t\r\n\"'") {
+		return fmt.Errorf("%w: %q", ErrBadSystemMount, mount)
+	}
+	return nil
+}
+
 func toSteps(in []sysdisk.Step) []Step {
 	out := make([]Step, 0, len(in))
 	for _, s := range in {
-		out = append(out, Step{ID: s.ID, Description: s.Description, Command: s.Command, Reversal: s.Reversal})
+		out = append(out, Step{
+			ID:           s.ID,
+			Description:  s.Description,
+			Argv:         append([]string(nil), s.Argv...),
+			ReversalArgv: append([]string(nil), s.ReversalArgv...),
+			Command:      s.Command(),
+			Reversal:     s.Reversal(),
+		})
 	}
 	return out
 }

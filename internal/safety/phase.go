@@ -197,6 +197,18 @@ func (m *Machine) CrossWall(v VerifiedArchive) error {
 	if v.runID != m.runID {
 		return fmt.Errorf("%w: archive %s, run %s", ErrWrongRun, v.runID, m.runID)
 	}
+	// The state machine records the volumes too, and refuses the two ways the
+	// proof and the target can come apart: an archive that names no system
+	// volume proves nothing about one, and an archive whose destination IS the
+	// system volume is not a second copy at all. Arm checks both as well; this
+	// is the check that ends up in the run log, at the moment the wall is
+	// recorded as crossed.
+	if normalizeGUID(v.systemVolumeGUID) == "" {
+		return ErrWrongVolume
+	}
+	if normalizeGUID(v.systemVolumeGUID) == normalizeGUID(v.destVolumeGUID) {
+		return ErrArchiveOnSystemVolume
+	}
 	if !m.mode.Commits() {
 		return ErrNotCommitMode
 	}
@@ -208,6 +220,7 @@ func (m *Machine) CrossWall(v VerifiedArchive) error {
 		"total_bytes":     v.totalBytes,
 		"manifest_digest": v.manifestDigest,
 		"dest_volume":     v.destVolumeGUID,
+		"system_volume":   v.systemVolumeGUID,
 		"verified_at":     v.verifiedAt.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 	})
 	return nil
@@ -231,6 +244,12 @@ func (m *Machine) DryRunWall(v VerifiedArchive) error {
 	}
 	if v.runID != m.runID {
 		return fmt.Errorf("%w: archive %s, run %s", ErrWrongRun, v.runID, m.runID)
+	}
+	if normalizeGUID(v.systemVolumeGUID) == "" {
+		return ErrWrongVolume
+	}
+	if normalizeGUID(v.systemVolumeGUID) == normalizeGUID(v.destVolumeGUID) {
+		return ErrArchiveOnSystemVolume
 	}
 	m.eventLocked(PhaseVerify.String(), "wall-reached-dry-run", runlog.Fields{
 		"run_id":     m.runID,
