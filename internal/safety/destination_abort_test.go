@@ -28,10 +28,6 @@ import (
 // The second one matters on its own. An abort that mangled the original is
 // data loss even when the tool reports success.
 
-// altGUID is a third volume identity, for the cases that need one that is
-// neither the system disk nor the fixture's backup drive.
-const altGUID = `\\?\Volume{33333333-3333-3333-3333-333333333333}\`
-
 // destFixture is a machine with a system disk, a backup drive, and a source
 // tree that lives — as it really would — on the system disk.
 type destFixture struct {

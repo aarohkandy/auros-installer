@@ -15,7 +15,28 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.23"
+  # 1.25.14, not 1.23, because of two vulnerabilities this code actually
+  # reaches, both found by govulncheck the first time it was able to run:
+  #
+  #   GO-2026-4602  os   "FileInfo can escape from a Root"  fixed in 1.25.8
+  #                 traced through filepath.WalkDir -> os.ReadDir, which is how
+  #                 this tool enumerates a stranger's Documents folder. A
+  #                 path-escape bug in the standard library of a program whose
+  #                 own quarantine has a ReasonPathEscape is not a footnote.
+  #   GO-2026-4971  net                                      fixed in 1.25.10
+  #                 traced through testharness/runner's QMP socket.
+  #
+  # Pinned EXACTLY rather than "1.25" + latest: the toolchain is part of the
+  # evidence, and a harness whose REPORT.md an auditor re-executes must not
+  # change compiler between the run that produced it and the run that checks
+  # it. A new CVE turns govulncheck red, and the bump is then a visible commit.
+  #
+  # go.mod still says `go 1.23`: that is the LANGUAGE floor and it does not
+  # move. This is the toolchain the shipped exe is built with, which is the
+  # thing that carries the fix. Windows support is unchanged — 1.21 dropped
+  # Windows 7/8, long before this floor, and 1.25 targets Windows 10+ on both
+  # amd64 and 386 exactly as 1.23 did.
+  GO_VERSION: "1.25.14"
 
 defaults:
   run:
@@ -162,10 +183,32 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           check-latest: true
-      - uses: golang/govulncheck-action@v1
-        with:
-          go-version-input: ${{ env.GO_VERSION }}
-          go-package: ./...
+
+      # This used to be golang/govulncheck-action@v1, and it could not install
+      # its own tool: the action pins GOTOOLCHAIN=local and then runs
+      # `go install golang.org/x/vuln/cmd/govulncheck@latest`, so the day x/vuln
+      # started requiring go >= 1.26 the job began failing with a toolchain
+      # error before it had looked at a single package. A security gate that is
+      # red for a reason unrelated to security is a gate people learn to scroll
+      # past, and this one was red for exactly that reason.
+      #
+      # GOTOOLCHAIN=auto applies to BUILDING THE TOOL only. The analysis still
+      # runs against GO_VERSION above, which is the toolchain the shipped exe is
+      # built with and therefore the one whose standard library is the answer.
+      # `go install pkg@version` runs outside this module, so go.mod stays
+      # dependency-free (D-series: zero third-party dependencies).
+      - name: install govulncheck
+        env:
+          GOTOOLCHAIN: auto
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: govulncheck (root module)
+        run: govulncheck ./...
+
+      # testharness/ is its own module, so ./... above does not reach it.
+      - name: govulncheck (testharness module)
+        working-directory: testharness
+        run: govulncheck ./...
 
   build-windows:
     name: build windows/${{ matrix.goarch }}

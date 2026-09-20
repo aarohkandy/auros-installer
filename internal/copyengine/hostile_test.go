@@ -38,9 +38,9 @@ import (
 // regular file ended up somewhere it can be named.
 func assertEveryFileAccountedFor(t *testing.T, e *env, res *Result, label string) {
 	t.Helper()
-	inQuarantine := map[string]bool{}
+	quarantined := map[string]bool{}
 	for _, r := range e.q.Records() {
-		inQuarantine[r.Path] = true
+		quarantined[r.Path] = true
 	}
 	var lost []string
 	err := filepath.WalkDir(e.src, func(p string, d fs.DirEntry, werr error) error {
@@ -58,7 +58,7 @@ func assertEveryFileAccountedFor(t *testing.T, e *env, res *Result, label string
 		if _, ok := res.Manifest.Lookup(logical); ok {
 			return nil
 		}
-		if inQuarantine[logical] {
+		if quarantined[logical] {
 			return nil
 		}
 		lost = append(lost, logical)
