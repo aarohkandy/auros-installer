@@ -160,6 +160,23 @@ func walkGoFiles(t *testing.T, root string, fn func(relPath string, imports []st
 			case ".git", "testdata", "vendor", "node_modules":
 				return fs.SkipDir
 			}
+			// A nested Go module is a separate program that is never linked into the shipped exe —
+			// `testharness/` is one, and its whole job is to drive QEMU, so of course it runs
+			// commands. The wall guards what we HAND TO A CUSTOMER, not the rig that tests it.
+			//
+			// But that exemption is exactly how someone would evade the wall in two years: drop a
+			// go.mod into internal/sneaky and shell out from there. So it does not apply to anything
+			// under internal/ or cmd/, which are the directories that become the binary. Those are
+			// walked whatever files they contain.
+			rel, rerr := filepath.Rel(root, p)
+			if rerr == nil && rel != "." {
+				top := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+				if top != "internal" && top != "cmd" {
+					if _, serr := os.Stat(filepath.Join(p, "go.mod")); serr == nil {
+						return fs.SkipDir
+					}
+				}
+			}
 			return nil
 		}
 		if !strings.HasSuffix(p, ".go") {

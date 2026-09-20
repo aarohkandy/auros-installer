@@ -209,6 +209,8 @@ type CorpusVerify struct {
 	HashMatches  int      `json:"hash_matches"`
 	Missing      []string `json:"missing,omitempty"`
 	Corrupt      []string `json:"corrupt,omitempty"`
+	SizeMismatch []string `json:"size_mismatch,omitempty"`
+	Unreadable   []string `json:"unreadable,omitempty"`
 	AllowedDev   []string `json:"allowed_deviations,omitempty"`
 	Clean        bool     `json:"clean"`
 	Reported     bool     `json:"reported"`

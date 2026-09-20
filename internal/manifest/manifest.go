@@ -226,6 +226,13 @@ func Read(r io.Reader) (*Manifest, error) {
 
 	first, err := readLine(br)
 	if err != nil {
+		// A CRLF or truncation found on the header line is not a "bad header" — it says the file was
+		// REWRITTEN or CUT, which is a different thing for the caller to act on. A manifest that has
+		// been through a Windows editor or git autocrlf no longer describes the bytes that were
+		// hashed, so callers distinguish it from a file that was simply never a manifest.
+		if errors.Is(err, ErrCorrupt) || errors.Is(err, ErrTruncated) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%w: %v", ErrBadHeader, err)
 	}
 	if first != Header {
