@@ -35,6 +35,12 @@ func TestCopy_ALockedFileIsQuarantinedAndTheRestOfTheRunFinishes(t *testing.T) {
 		"sub/readable-3.txt": "still fine",
 	})
 	locked := filepath.Join(e.src, "outlook.pst")
+	// The source fingerprint is taken BEFORE the file is locked. Snapshot hashes
+	// the contents of every file, so taken afterwards it failed with "permission
+	// denied" on the one file this test exists to lock — before Run was ever
+	// called. That went unseen because a root container skips this test above;
+	// a non-root CI runner is the first place it ever executed.
+	srcBefore := testsupport.Snapshot(t, e.src)
 	if err := os.Chmod(locked, 0o000); err != nil {
 		t.Skipf("cannot remove permissions here: %v", err)
 	}
@@ -43,7 +49,6 @@ func TestCopy_ALockedFileIsQuarantinedAndTheRestOfTheRunFinishes(t *testing.T) {
 		f.Close()
 		t.Skip("this filesystem ignores permissions; the file is not actually locked")
 	}
-	srcBefore := testsupport.Snapshot(t, e.src)
 
 	res, err := Run(context.Background(), e.opts())
 	if err != nil {
@@ -79,6 +84,13 @@ func TestCopy_ALockedFileIsQuarantinedAndTheRestOfTheRunFinishes(t *testing.T) {
 
 	assertNoPartials(t, e.dest)
 	assertEveryFileAccountedFor(t, e, res, "Documents")
+	// Unlock before comparing, so the comparison can READ the locked file. The
+	// fingerprint records content, not mode, so this hides nothing the tool did;
+	// what it adds is proof that the one file the tool failed to open — the
+	// mail archive — is byte-for-byte what it was.
+	if err := os.Chmod(locked, 0o644); err != nil {
+		t.Fatalf("restoring permissions to compare the source: %v", err)
+	}
 	assertSourceUnchanged(t, e, srcBefore)
 	e.assertSystemDiskUntouched(t)
 }
