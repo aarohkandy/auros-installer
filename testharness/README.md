@@ -26,10 +26,21 @@ is obeyed until the evening somebody is in a hurry, so it is also a thing that d
 The runner mints a **harness token** once per suite and writes it to a small FAT image labelled
 `AUROS-HARNESS`, attached read-only to the test VM and to nothing else. The token names the **volume
 serial** of the disk the harness is allowed to destroy — which the runner knows because the base image
-was built once and its volume serial was recorded then. `gen generate` and `faultagent` both read the
-volume serial of the path they are about to write to, compare, and exit without touching anything if it
-does not match. Drive letters are not used for this: a mount point or a `subst`'d letter can alias the
-system volume, which is the same aliasing mistake `SAFETY.md` phase 3 forbids in the installer itself.
+was built once and its volume serial was recorded then. `gen generate`, `gen hold` and `faultagent` all
+read the volume serial of the path they are about to write to, compare, and exit without touching
+anything if it does not match. Drive letters are not used for this: a mount point or a `subst`'d letter
+can alias the system volume, which is the same aliasing mistake `SAFETY.md` phase 3 forbids in the
+installer itself. `gen hold` additionally refuses any path in its plan that is not under the corpus
+root, because the token vouches for a *volume* while the plan names *paths*.
+
+**On all 120 runs, not twenty.** The generated `run.cmd` runs `faultagent -check-token-only`
+*synchronously* before anything else and halts the run on a refusal, reporting exit code 90 — which is
+outside anything the installer can return, so "the harness would not let this run start" can never be
+read as "the installer aborted". This is not a detail: until it existed, `faultagent` was started only
+when a scenario was named, so the hundred clean runs launched `gen hold` and the installer with nothing
+in the guest consulting the token at all, and the guard this section describes was exercised on one run
+in six. `runner doctor` also refuses to start a suite whose `base.system_volume_serial` or
+`base.dest_volume_serial` is empty, or where the two are the same volume.
 
 There is **no `--force`**. To run any of this against a real machine you would have to mint a token
 naming that machine's volume serial, put it on a volume labelled `AUROS-HARNESS`, and attach it. That is
@@ -112,10 +123,26 @@ Everything about the suite depends on this being done once and then left alone.
    overlays it, so every run starts with a genuinely empty destination.
 
 From then on: **one base image, one throwaway overlay per run.** `qemu-img create -f qcow2 -F qcow2 -b
-<base> <overlay>`, deleted when the run ends. The base's hash is checked *before and after every single
-run* — "before" catches an edited base, "after" catches a run that somehow wrote through its overlay,
-which should be impossible and is therefore exactly the thing worth checking. Without that, run 74 is
-being tested against whatever runs 1–73 left behind and "100 consecutive" is decoration.
+<base> <overlay>`, deleted when the run ends. **Both** base images' hashes **and file modes** are
+checked *before and after every single run* — "before" catches an edited base, "after" catches a run
+that somehow wrote through its overlay, which should be impossible and is therefore exactly the thing
+worth checking. Without that, run 74 is being tested against whatever runs 1–73 left behind and "100
+consecutive" is decoration.
+
+It is **both** images because the destination base used to be hashed exactly once per suite, before run
+1, so "every run starts with a genuinely empty destination" was verified for one run in a hundred and
+twenty. A destination base contaminated at run 40 — a stray `qemu-img commit`, an operator editing it
+— is the same class of failure as a contaminated system base and is *harder* to see, because a
+destination that already holds the previous run's archive makes a broken copy look complete.
+
+The mode check is there because a hash is a statement about the past and a mode with no write bit is a
+statement about the next five minutes. An operator who has just made a base image writable to "quickly
+fix something" is the case the hash catches one run too late.
+
+**What this section does not claim:** `vm.go` does not pass a backing-file read-only option to QEMU. An
+earlier version of its comment said it did and the argv never contained one. QEMU opens a qcow2 backing
+file read-only unless told otherwise, but that is an upstream default, so the guarantee this harness
+stands behind is the one it measures: the hash and the mode, on both images, on every run.
 
 ## 4. Running the suite
 
@@ -125,6 +152,15 @@ runner doctor -config runner.config.json          # refuse to start a suite that
 runner run    -config runner.config.json -suite all -n 100
 runner report -config runner.config.json -results artifacts/<suite> -template REPORT.md -out REPORT.filled.md
 ```
+
+`report` takes the **shape the suite owes** — `-expect-clean` (default 100) and the twenty catalogue IDs
+— and fills it in from what it finds. A run that produced no `result.json` is a row that says `MISSING`
+and a failure in the denominator, never an absent row: the denominators used to be counted from the
+files that happened to exist, so a suite where forty runs never started reported "60/60 clean" in the
+same sentence that quotes §6C. A result that is present but is not one of the expected runs stops the
+report, which is also what happens when `-results` is pointed at a parent directory holding several
+suites. Every provenance value in the header is read out of the *results* and must agree across them
+and with the config; a config edited after the runs is refused by name.
 
 `plan` is the part that runs on a laptop. It reads the golden manifest and resolves all twenty triggers
 to exact `(file index, byte offset)` pins by integer arithmetic — no VM involved, identical on every
@@ -165,9 +201,16 @@ it. `auros-migrate.exe` must:
    Trigger precision is bounded by this granularity, and each run publishes its actual overshoot so a
    reader can judge whether a pin was real.
 3. **Materialise the archive** at `<dest>\auros-archive\data\<relative path>`, with its own manifest at
-   `<dest>\auros-archive\manifest.jsonl`.
+   `<dest>\auros-archive\manifest.jsonl`. The harness re-hashes that tree against the golden manifest on
+   the verify boot (postcondition **P8**) — file for file, from raw bytes, taking nothing from the
+   installer. Spec §4.1 asks for "the data in two places and the second copy verified by count and
+   hash"; P4 measures place one and P8 measures place two.
 4. **Write `<dest>\auros-archive\COMPLETE` only after VERIFY succeeds** with zero unresolved files. On an
-   aborted run it must not exist — that is postcondition P5, and it is the Wubi failure in one line.
+   aborted run it must not exist — that is the Wubi failure in one line. The marker is the **subject's
+   opinion of itself**, so P5 checks it *against* P8's measurement rather than instead of it: on an
+   abort it must be absent, and on a run that claims success it must be present *and* the archive must
+   actually match. An installer that writes a well-formed progress log, copies nothing, exits 0 and
+   touches `COMPLETE` used to score 100/100.
 5. **Exit 0 on success, non-zero on abort**, and accept `--no-arm` to stop at the wall.
 
 No network in any of this. A school's uplink is not a safety-critical component (SAFETY.md rule 4), so
@@ -179,14 +222,26 @@ Spec §6C's clause about Windows still booting normally is the slowest check in 
 whose absence nobody notices, because every other number still looks green without it. So it is not a
 flag. There is no `--skip-boot-check` and no `--fast`. Four things make skipping it hard:
 
-1. `boot_check` is a **required** property in `runner/result.schema.json`. A result without it does not
-   validate, and `runner report` counts anything that does not validate as a **failed** run, never as
-   unknown.
+1. `boot_check` is a **required** property in `runner/result.schema.json`, and that schema is **loaded
+   and evaluated** — embedded into the binary with `go:embed`, checked by `runner/schema.go`, and a
+   result that does not validate carries a failing `SCHEMA` check into the report. This sentence used
+   to be false: the file existed, three comments referred to it, and no line of Go ever opened it, so
+   a hand-written `{"kind":"clean","checks":[{"id":"P1","status":"pass"}]}` dropped into the results
+   tree was counted as a clean pass.
 2. `performed` defaults to false and false is a fail. Absence is not neutral.
 3. The verdict is recomputed by the reporter from the checks; a harness that wrote `pass` without doing
    the work would be caught by the thing reading it.
 4. "Boots" is not "the process started". The evidence is a beacon the guest emits from a logged-on
    session, and its *absence* within the timeout is a failure rather than an inconclusive.
+5. The reporter requires every postcondition ID applicable to the run's kind to be **present**. A
+   `checks` array that simply omits P2/P3/P4 is otherwise indistinguishable from one where they passed,
+   and `Recompute` only looks at the checks that are there.
+
+`runner/schema.go` implements a documented **subset** of JSON Schema. The supported keyword list is not
+a comment: `TestSchemaUsesOnlySupportedKeywords` walks every node of the schema and fails the build if
+it finds anything outside it, and the validator itself refuses a document whose schema uses a keyword it
+does not implement. Adding `oneOf` to the schema breaks the build on the commit that adds it, which is
+the only moment anybody is in a position to implement it.
 
 The boot-check boot attaches **nothing of ours** — no marker volume, no destination, no installer. A
 machine that only boots when the harness's disks are present has not demonstrated the thing a school's
@@ -235,11 +290,19 @@ runner/    runner.go         config, suite orchestration, report generation.
            execute.go        one run: overlays, marker volume, the three boots, the postconditions.
            vm.go             QEMU, qcow2 overlays, QMP, base-image immutability.
            bootcheck.go      "Windows still boots normally", made unskippable.
+           schema.go         result.schema.json, embedded and actually evaluated.
            cmd/bootbeacon/   the beacon baked into the base image.
            result.schema.json  the shape of one run's evidence. Fails closed.
            runner.config.json  host and base-image configuration.
+           *_test.go         one test per attack that once worked against this harness.
 REPORT.md  the template the published evidence is filled into.
 ```
+
+`testharness/` is **its own Go module** (`testharness/go.mod`), which is why the repository root's
+`go build ./...` never reached it and why `runner` was shipped in a state where it did not compile at
+all. `.github/workflows/ci.yml` now has a `testharness` job that builds, vets, gofmts, race-tests and
+cross-compiles this directory for windows/amd64 and windows/386 on every push. A README that describes
+what a harness enforces is an untested assertion until something compiles it.
 
 Build: `go build ./gen`, `GOOS=windows GOARCH=amd64 go build -o dist/faultagent.exe ./fault/cmd/faultagent`,
 `GOOS=windows GOARCH=amd64 go build -o dist/bootbeacon.exe ./runner/cmd/bootbeacon`,

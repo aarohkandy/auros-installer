@@ -92,8 +92,14 @@ type Report struct {
 
 // Clean reports whether every file in the manifest was found at the destination
 // with the right size and the right digest, with nothing extra alongside it.
+//
+// A report over zero files is NOT clean. 0 == 0 == 0 satisfies every equality
+// below, so without this an empty verification reads as a perfect one, and a
+// perfect verification of nothing is the strongest-looking evidence in the
+// program. "Nothing disagreed" is only reassuring if something was checked.
 func (r *Report) Clean() bool {
 	return r != nil &&
+		r.ManifestCount > 0 &&
 		len(r.Disagreements) == 0 &&
 		r.ManifestCount == r.DestinationCount &&
 		r.Checked == r.ManifestCount

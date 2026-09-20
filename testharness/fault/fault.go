@@ -260,7 +260,7 @@ func ResolvePin(entries []Entry, t Trigger) (Pin, error) {
 		}
 		if cum+sz > target {
 			return Pin{
-				Phase:            t.Phase, BP: t.BP,
+				Phase: t.Phase, BP: t.BP,
 				FileIndex:        entries[i].Index,
 				Path:             entries[i].Path,
 				WinPath:          entries[i].WinPath,
@@ -275,7 +275,7 @@ func ResolvePin(entries []Entry, t Trigger) (Pin, error) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].Size > 0 {
 			return Pin{
-				Phase:            t.Phase, BP: t.BP,
+				Phase: t.Phase, BP: t.BP,
 				FileIndex:        entries[i].Index,
 				Path:             entries[i].Path,
 				WinPath:          entries[i].WinPath,

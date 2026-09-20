@@ -287,11 +287,16 @@ type ArmResult struct {
 func (r *ArmResult) Describe() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "mode: %s\n", r.Mode)
-	if !r.Performed {
+	switch {
+	case r.Performed:
+		b.WriteString("performed:\n")
+	case r.Failed != "":
+		// Something ran and then stopped. Saying "nothing was performed" here
+		// would be the same class of lie this file spent a release removing.
+		fmt.Fprintf(&b, "STOPPED at step %q. What had already run was reversed.\n", r.Failed)
+	default:
 		b.WriteString("no step below was performed; nothing on this machine was changed.\n")
 		b.WriteString("this is what --commit would do:\n")
-	} else {
-		b.WriteString("performed:\n")
 	}
 	for n, s := range r.Steps {
 		fmt.Fprintf(&b, "  %d. %s\n     run:  %s\n     undo: %s\n", n+1, s.Description, s.Command, s.Reversal)
@@ -366,10 +371,27 @@ func Arm(ctx context.Context, m *Machine, va VerifiedArchive, req ArmRequest) (r
 		return nil, ErrFirmwareUnknown
 	}
 
+	// If phase 1 could not tell, ask the volume itself. This is a status read,
+	// not a change, and it is the only way a stdlib-only binary can answer a
+	// question SAFETY.md requires answered before anything is planned. It can
+	// only turn Unknown into a fact; it is never consulted to overrule one.
+	bl := bitLockerState(req.BitLocker)
+	if bl == sysdisk.BitLockerUnknown {
+		if probed, perr := sysdisk.ProbeBitLocker(ctx, va.systemMount); perr == nil {
+			bl = probed
+			logf("bitlocker-probed", runlog.Fields{"result": probed.String()})
+		} else {
+			logf("bitlocker-unknown", runlog.Fields{
+				"error": perr.Error(),
+				"note":  "BitLocker could not be established; the suspend step is planned anyway",
+			})
+		}
+	}
+
 	intent := sysdisk.Intent{
 		SystemVolumeGUID: va.systemVolumeGUID,
 		SystemMount:      va.systemMount,
-		BitLocker:        bitLockerState(req.BitLocker),
+		BitLocker:        bl,
 		BootMediaGUID:    req.BootMediaGUID,
 		Restart:          req.Restart,
 		Commit:           m.Mode().Commits(),
@@ -391,7 +413,7 @@ func Arm(ctx context.Context, m *Machine, va VerifiedArchive, req ArmRequest) (r
 		logf("dry-run-plan", runlog.Fields{
 			"steps":                 len(steps),
 			"firmware_known":        req.FirmwareKnown,
-			"bitlocker":             req.BitLocker.String(),
+			"bitlocker":             bl.String(),
 			"system_disk_untouched": true,
 		})
 		return res, nil

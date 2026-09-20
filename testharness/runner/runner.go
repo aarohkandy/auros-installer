@@ -5,18 +5,23 @@
 // WHAT A RUN IS
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 //
-//	 1. verify the immutable base images still hash to what base-image.json says   ← before AND after
-//	 2. create a fresh qcow2 overlay for the system disk and for the destination
-//	 3. build the marker volume: harness token, golden manifest, guest binaries, run script
-//	 4. boot; the base image's startup task runs X:\run.cmd
-//	 5. the guest holds the locked files open, starts the fault agent, runs the installer
-//	 6. for a host-site fault the guest asks the runner over the serial line and the runner acts
-//	 7. the guest reports the installer's exit code and powers off — or the runner kills it
-//	 8. BOOT CHECK: boot the same overlay with NOTHING of ours attached and prove Windows comes back
-//	 9. VERIFY BOOT: re-attach and re-hash all 18,000 source files against the golden manifest
-//	10. write result.json, hash every artefact, delete the overlays
+//  1. verify BOTH immutable base images still hash — and are still unwritable   ← before AND after
+//  2. create a fresh qcow2 overlay for the system disk and for the destination
+//  3. build the marker volume: harness token, golden manifest, guest binaries, run script
+//  4. boot; the base image's startup task runs X:\run.cmd
+//  5. the guest proves the §4.7 token vouches for these volumes, or the run halts before anything runs
+//  6. the guest holds the locked files open, starts the fault agent, runs the installer
+//  7. for a host-site fault the guest asks the runner over the serial line and the runner acts
+//  8. the guest reports the installer's exit code and powers off — or the runner kills it on the run
+//     timeout, which is a FAILING check of its own (P9) and never an abort
+//  9. BOOT CHECK: boot the same overlay with NOTHING of ours attached and prove Windows comes back
+//  10. VERIFY BOOT: re-attach and re-hash TWO trees against the golden manifest — the source corpus on
+//     C: (the original was not damaged, P4) and the archive on the destination (the second copy exists
+//     and matches, P8). Spec §4.1 needs both; the installer's own COMPLETE marker answers neither.
+//  11. write result.json — ALWAYS, including when the run could not finish — hash every artefact,
+//     delete the overlays
 //
-// Steps 8 and 9 are the slow ones and step 8 is the one spec §6C actually names. Neither can be turned
+// Steps 9 and 10 are the slow ones and step 9 is the one spec §6C actually names. Neither can be turned
 // off; see bootcheck.go for how that is enforced rather than requested.
 //
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -80,7 +85,7 @@ type BaseCfg struct {
 	CorpusProfile  string `json:"corpus_profile"`
 	CorpusCount    int    `json:"corpus_count"`
 	CorpusDigest   string `json:"corpus_digest"`
-	CorpusFaithful bool  `json:"corpus_faithful"`
+	CorpusFaithful bool   `json:"corpus_faithful"`
 
 	// SystemStateSHA256 is the pristine value of the boot-critical region, captured at base build time.
 	// Every aborted run must still report this exact value.
@@ -91,8 +96,8 @@ type BaseCfg struct {
 }
 
 type MachineCfg struct {
-	MemoryMB int `json:"memory_mb"`
-	CPUs     int `json:"cpus"`
+	MemoryMB int  `json:"memory_mb"`
+	CPUs     int  `json:"cpus"`
 	Headless bool `json:"headless"`
 }
 
@@ -271,8 +276,8 @@ type RunResult struct {
 
 	HostProfile string `json:"host_profile"` // "parallel=N reclaim=…" — the B1 path this ran on
 
-	BaseSystemSHA string `json:"base_system_sha256"`
-	BaseDestSHA   string `json:"base_dest_sha256"`
+	BaseSystemSHA  string `json:"base_system_sha256"`
+	BaseDestSHA    string `json:"base_dest_sha256"`
 	CorpusDigest   string `json:"corpus_digest"`
 	CorpusProfile  string `json:"corpus_profile"`
 	CorpusSeed     uint64 `json:"corpus_seed"`
@@ -723,16 +728,70 @@ func failureSummary(r *RunResult) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// report — recomputes every verdict rather than trusting one
+// report — recomputes every verdict, and counts the runs that are NOT there
+//
+// The denominators used to be counted from the result.json files that happened to exist. A run that
+// crashed before writing one was therefore not a failure, it was invisible: nothing compared the totals
+// to 100 and 20, nothing checked that ordinals 1..100 were all present, and nothing checked that all
+// twenty scenario IDs appeared. A suite where forty runs never started reported "60/60 clean", in the
+// same sentence that quotes spec §6C.
+//
+// So the reporter now starts from the SHAPE the suite is supposed to have — n clean runs and the whole
+// catalogue — builds the expected set of run IDs, and fills it in from what it finds. A run that is
+// missing is a row that says MISSING and a failure in the denominator. A result that is present but is
+// not one of the expected runs stops the report entirely, which is also what happens when `-results` is
+// pointed at a parent directory holding several suites.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+// expectedRun is one row the suite must produce. The ID is derived, never read from a file.
+type expectedRun struct {
+	RunID    string
+	Kind     string
+	Ordinal  int
+	Scenario string
+}
+
+// expectedSuite builds the full set of runs a §6C suite owes.
+func expectedSuite(nClean int, scenarios []fault.Scenario) []expectedRun {
+	out := make([]expectedRun, 0, nClean+len(scenarios))
+	for i := 1; i <= nClean; i++ {
+		out = append(out, expectedRun{RunID: runLabel("clean", i, ""), Kind: "clean", Ordinal: i})
+	}
+	for i, sc := range scenarios {
+		out = append(out, expectedRun{
+			RunID: runLabel("fault", i+1, sc.ID), Kind: "fault", Ordinal: i + 1, Scenario: sc.ID})
+	}
+	return out
+}
+
+// requiredChecks lists the postcondition IDs a result of this shape must CONTAIN.
+//
+// Presence, not just status. `Recompute` only looks at the checks that are there, so a checks array
+// that simply omits P2/P3/P4 is indistinguishable from one where they passed — which is how a
+// hand-written `{"kind":"clean","checks":[{"id":"P1","status":"pass"}]}` was counted as a clean PASS.
+func requiredChecks(kind string) []string {
+	base := []string{"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"}
+	if kind == "fault" {
+		return append([]string{"P0"}, base...)
+	}
+	return base
+}
 
 func cmdReport(args []string) error {
 	fs := flag.NewFlagSet("report", flag.ExitOnError)
 	cfgPath := fs.String("config", "runner.config.json", "")
-	resultsDir := fs.String("results", "", "directory of run result JSON files")
+	resultsDir := fs.String("results", "", "directory of ONE suite's run result JSON files")
 	template := fs.String("template", "REPORT.md", "")
 	out := fs.String("out", "REPORT.filled.md", "")
+	expectClean := fs.Int("expect-clean", 100,
+		"how many clean runs this suite owes. Spec §6C says 100. A run that is missing is a FAILURE, "+
+			"not an absent row.")
+	expectFaults := fs.String("expect-faults", "",
+		"comma-separated scenario IDs this suite owes; empty means the whole 20-scenario catalogue")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := fault.Validate(); err != nil {
 		return err
 	}
 	cfg, err := loadConfig(*cfgPath)
@@ -742,41 +801,101 @@ func cmdReport(args []string) error {
 	if *resultsDir == "" {
 		return errors.New("-results is required")
 	}
+	if *expectClean < 0 {
+		return errors.New("-expect-clean cannot be negative")
+	}
 	tmpl, err := os.ReadFile(*template)
 	if err != nil {
 		return err
 	}
-	var results []*RunResult
-	err = filepath.Walk(*resultsDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || filepath.Base(p) != "result.json" {
-			return err
-		}
-		b, rerr := os.ReadFile(p)
-		if rerr != nil {
-			return rerr
-		}
-		var r RunResult
-		if jerr := json.Unmarshal(b, &r); jerr != nil {
-			// A result that does not parse is a FAILED run, never an absent one.
-			results = append(results, &RunResult{
-				RunID:  p, Verdict: "fail",
-				Checks: []Check{{ID: "SCHEMA", Name: "result parses", Status: "fail", Detail: jerr.Error()}},
-			})
-			return nil
-		}
-		results = append(results, &r)
-		return nil
-	})
+
+	scenarios, err := resolveExpectedScenarios(*expectFaults)
 	if err != nil {
 		return err
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].RunID < results[j].RunID })
+	expected := expectedSuite(*expectClean, scenarios)
 
+	found, err := loadResults(*resultsDir)
+	if err != nil {
+		return err
+	}
+
+	// ── every result must be one of the expected runs ─────────────────────────────────────────────
+	byID := map[string]*RunResult{}
+	var problems []string
+	want := map[string]expectedRun{}
+	for _, e := range expected {
+		want[e.RunID] = e
+	}
+	for _, r := range found {
+		e, ok := want[r.RunID]
+		if !ok {
+			problems = append(problems, fmt.Sprintf(
+				"%s: run_id %q is not one of the %d runs this suite owes. Either -results points at more "+
+					"than one suite, or a result was written by hand",
+				r.sourcePath, r.RunID, len(expected)))
+			continue
+		}
+		if prev, dup := byID[r.RunID]; dup {
+			problems = append(problems, fmt.Sprintf(
+				"%s: a second result for run %s (the first was %s). Two files claiming to be the same run "+
+					"means the denominator is guesswork", r.sourcePath, r.RunID, prev.sourcePath))
+			continue
+		}
+		if r.Kind != e.Kind {
+			problems = append(problems, fmt.Sprintf(
+				"%s: run %s declares kind %q, but that run id is a %s run. `kind` is read from the file, "+
+					"so an empty or wrong one used to fall through to the clean branch and count as a pass",
+				r.sourcePath, r.RunID, r.Kind, e.Kind))
+			continue
+		}
+		if r.Scenario != e.Scenario {
+			problems = append(problems, fmt.Sprintf(
+				"%s: run %s declares scenario %q, expected %q", r.sourcePath, r.RunID, r.Scenario, e.Scenario))
+			continue
+		}
+		byID[r.RunID] = r
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("the results directory does not describe one clean suite:\n  %s",
+			strings.Join(problems, "\n  "))
+	}
+
+	// ── one suite, and the suite the config describes ─────────────────────────────────────────────
+	present := make([]*RunResult, 0, len(byID))
+	for _, e := range expected {
+		if r, ok := byID[e.RunID]; ok {
+			present = append(present, r)
+		}
+	}
+	if len(present) == 0 {
+		return fmt.Errorf("no results under %s matched any of the %d runs this suite owes",
+			*resultsDir, len(expected))
+	}
+	prov, err := agreedProvenance(present, cfg)
+	if err != nil {
+		return err
+	}
+
+	// ── rows ──────────────────────────────────────────────────────────────────────────────────────
 	cleanPass, cleanTotal, faultPass, faultTotal := 0, 0, 0, 0
 	var cleanRows, faultRows strings.Builder
-	for _, r := range results {
+	for _, e := range expected {
+		r, ok := byID[e.RunID]
+		if !ok {
+			// A run that never produced a result is a FAILED run. It occupies its row in the table and
+			// its place in the denominator, and it says so.
+			r = &RunResult{RunID: e.RunID, Kind: e.Kind, Ordinal: e.Ordinal, Scenario: e.Scenario,
+				Verdict: "fail",
+				Checks: []Check{{ID: "MISSING", Name: "the run produced a result", Status: "fail",
+					Detail: "no result.json for this run: it never started, or it ended before it could " +
+						"write one. An invisible run is not an absent run"}}}
+		} else {
+			assertChecksPresent(r)
+		}
 		v := r.Recompute() // NOT r.Verdict
-		if r.Kind == "fault" {
+		digest := resultDigest(r)
+		if e.Kind == "fault" {
 			faultTotal++
 			if v == "pass" {
 				faultPass++
@@ -793,42 +912,44 @@ func cmdReport(args []string) error {
 			if r.Fire != nil && r.Fire.Fired {
 				over = fmt.Sprintf("%d", r.Fire.OvershootBytes)
 			}
-			fmt.Fprintf(&faultRows, "| %s | %s | %s | %s | %s | %d/%d | %s | %s |\n",
-				r.RunID, r.Scenario, pin, over, boot,
-				r.Corpus.HashMatches, r.Corpus.Expected, resultDigestShort(r), v)
+			fmt.Fprintf(&faultRows, "| %s | %s | %s | %s | %s | %d/%d | %d/%d | %s | %s |\n",
+				r.RunID, e.Scenario, pin, over, boot,
+				r.Corpus.HashMatches, r.Corpus.Expected,
+				r.Archive.HashMatches, r.Archive.Expected, digest, v)
 		} else {
 			cleanTotal++
 			if v == "pass" {
 				cleanPass++
 			}
-			fmt.Fprintf(&cleanRows, "| %s | %d/%d | %d | %.0fs | %s | %s |\n",
+			fmt.Fprintf(&cleanRows, "| %s | %d/%d | %d/%d | %d | %.0fs | %s | %s |\n",
 				r.RunID, r.Corpus.HashMatches, r.Corpus.Expected,
-				len(r.Corpus.Corrupt), float64(r.DurationMS)/1000, resultDigestShort(r), v)
+				r.Archive.HashMatches, r.Archive.Expected,
+				len(r.Corpus.Corrupt), float64(r.DurationMS)/1000, digest, v)
 		}
 	}
 
 	s := string(tmpl)
 	repl := map[string]string{
-		"{{SUITE_ID}}":         firstNonEmpty(results, func(r *RunResult) string { return r.SuiteID }),
-		"{{HARNESS_VERSION}}":  runnerVersion,
-		"{{CORPUS_DIGEST}}":    cfg.Base.CorpusDigest,
-		"{{CORPUS_PROFILE}}":   cfg.Base.CorpusProfile,
-		"{{CORPUS_SEED}}":      fmt.Sprintf("%d", cfg.Base.CorpusSeed),
-		"{{CORPUS_COUNT}}":     fmt.Sprintf("%d", cfg.Base.CorpusCount),
-		"{{BASE_SYSTEM_SHA}}":  cfg.Base.SystemSHA256,
-		"{{BASE_DEST_SHA}}":    cfg.Base.DestSHA256,
-		"{{WINDOWS_EDITION}}":  cfg.Base.WindowsEdition,
-		"{{ISO_SOURCE}}":       cfg.Base.ISOSource,
-		"{{INSTALLER_SCOPE}}":  cfg.InstallerScope,
-		"{{HOST_PROFILE}}":     fmt.Sprintf("parallel=%d reclaim_between_runs=%v", cfg.Host.Parallel, cfg.Host.ReclaimBetweenRuns),
-		"{{POWER_CUT_NOTE}}":   PowerCutNote,
-		"{{CLEAN_PASS}}":       fmt.Sprintf("%d", cleanPass),
-		"{{CLEAN_TOTAL}}":      fmt.Sprintf("%d", cleanTotal),
-		"{{FAULT_PASS}}":       fmt.Sprintf("%d", faultPass),
-		"{{FAULT_TOTAL}}":      fmt.Sprintf("%d", faultTotal),
-		"{{CLEAN_RUN_ROWS}}":   strings.TrimRight(cleanRows.String(), "\n"),
-		"{{FAULT_RUN_ROWS}}":   strings.TrimRight(faultRows.String(), "\n"),
-		"{{SCENARIO_TABLE}}":   fault.Describe(),
+		"{{SUITE_ID}}":        prov.SuiteID,
+		"{{HARNESS_VERSION}}": runnerVersion,
+		"{{CORPUS_DIGEST}}":   prov.CorpusDigest,
+		"{{CORPUS_PROFILE}}":  prov.CorpusProfile,
+		"{{CORPUS_SEED}}":     prov.CorpusSeed,
+		"{{CORPUS_COUNT}}":    prov.CorpusFiles,
+		"{{BASE_SYSTEM_SHA}}": prov.BaseSystemSHA,
+		"{{BASE_DEST_SHA}}":   prov.BaseDestSHA,
+		"{{WINDOWS_EDITION}}": prov.WindowsEdition,
+		"{{ISO_SOURCE}}":      prov.ISOSource,
+		"{{INSTALLER_SCOPE}}": prov.InstallerScope,
+		"{{HOST_PROFILE}}":    prov.HostProfile,
+		"{{POWER_CUT_NOTE}}":  PowerCutNote,
+		"{{CLEAN_PASS}}":      fmt.Sprintf("%d", cleanPass),
+		"{{CLEAN_TOTAL}}":     fmt.Sprintf("%d", cleanTotal),
+		"{{FAULT_PASS}}":      fmt.Sprintf("%d", faultPass),
+		"{{FAULT_TOTAL}}":     fmt.Sprintf("%d", faultTotal),
+		"{{CLEAN_RUN_ROWS}}":  strings.TrimRight(cleanRows.String(), "\n"),
+		"{{FAULT_RUN_ROWS}}":  strings.TrimRight(faultRows.String(), "\n"),
+		"{{SCENARIO_TABLE}}":  fault.Describe(),
 	}
 	for k, v := range repl {
 		s = strings.ReplaceAll(s, k, v)
@@ -841,23 +962,195 @@ func cmdReport(args []string) error {
 	return os.WriteFile(*out, []byte(s), 0o644)
 }
 
-func firstNonEmpty(rs []*RunResult, f func(*RunResult) string) string {
-	for _, r := range rs {
-		if v := f(r); v != "" {
-			return v
-		}
+func resolveExpectedScenarios(list string) ([]fault.Scenario, error) {
+	if strings.TrimSpace(list) == "" {
+		return fault.StandardSuite(), nil
 	}
-	return "(none)"
+	var out []fault.Scenario
+	for _, id := range strings.Split(list, ",") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		sc, err := fault.Lookup(id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sc)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("-expect-faults was given but names no scenario")
+	}
+	return out, nil
 }
 
-func resultDigestShort(r *RunResult) string {
-	b, err := json.Marshal(r)
+// loadResults reads every result.json under dir, validating each against result.schema.json.
+func loadResults(dir string) ([]*RunResult, error) {
+	var results []*RunResult
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || filepath.Base(p) != "result.json" {
+			return err
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		var r RunResult
+		if jerr := json.Unmarshal(b, &r); jerr != nil {
+			// A result that does not parse is a FAILED run, never an absent one. It keeps no run id, so
+			// it will be reported as a result that is not one of the expected runs.
+			results = append(results, &RunResult{
+				RunID: p, Verdict: "fail", sourcePath: p,
+				Checks: []Check{{ID: "SCHEMA", Name: "result parses", Status: "fail", Detail: jerr.Error()}},
+			})
+			return nil
+		}
+		r.sourcePath = p
+		// README §6 defence #1, now true: the schema is loaded and evaluated, and a result that does not
+		// validate carries a FAILING check into the report rather than a zero value that reads as a pass.
+		if bad := ValidateResultJSON(b); len(bad) > 0 {
+			r.Checks = append(r.Checks, Check{
+				ID: "SCHEMA", Name: "the result validates against result.schema.json", Status: "fail",
+				Detail: strings.Join(bad, "; ")})
+		}
+		results = append(results, &r)
+		return nil
+	})
 	if err != nil {
-		return "(unhashable)"
+		return nil, err
 	}
-	sum, err := sha256Bytes(b)
+	sort.Slice(results, func(i, j int) bool { return results[i].sourcePath < results[j].sourcePath })
+	return results, nil
+}
+
+// assertChecksPresent appends a failing check for every postcondition this run's kind owes and does not
+// have. A check that is absent is a check that did not run.
+func assertChecksPresent(r *RunResult) {
+	have := map[string]bool{}
+	for _, c := range r.Checks {
+		have[c.ID] = true
+	}
+	for _, id := range requiredChecks(r.Kind) {
+		if !have[id] {
+			r.Checks = append(r.Checks, Check{
+				ID: id, Name: "postcondition " + id + " was recorded", Status: "fail",
+				Detail: "this run's result contains no " + id + ". A checks array that omits a " +
+					"postcondition is indistinguishable from one where it passed, so it is a failure"})
+		}
+	}
+	if r.BootCheck == nil {
+		r.Checks = append(r.Checks, Check{
+			ID: "SCHEMA", Name: "boot_check is present", Status: "fail",
+			Detail: "boot_check is null: spec §6C's 'Windows still boots normally' has no evidence here"})
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// PROVENANCE — taken from the runs, cross-checked against each other and against the config
+//
+// Every header value in the published evidence used to come from the config file AS IT READ AT REPORT
+// TIME. Each result already stored its own base image hashes, corpus digest, profile and host profile,
+// and the reporter read none of them. So a report saying "profile realistic, 18,000 files, image <sha>"
+// could be generated over 120 runs of a compact corpus on a different base image, by editing one file
+// after the suite finished, and the sentence "a corpus regenerated from seed X hashes to Y" became a
+// claim about a config file rather than about the runs.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+type provenance struct {
+	SuiteID, HostProfile        string
+	BaseSystemSHA, BaseDestSHA  string
+	CorpusDigest, CorpusProfile string
+	CorpusSeed, CorpusFiles     string
+	WindowsEdition, ISOSource   string
+	InstallerScope              string
+}
+
+func agreedProvenance(rs []*RunResult, cfg *Config) (provenance, error) {
+	var problems []string
+	agree := func(field string, f func(*RunResult) string, configValue string) string {
+		seen := map[string][]string{}
+		for _, r := range rs {
+			v := f(r)
+			seen[v] = append(seen[v], r.RunID)
+		}
+		if len(seen) > 1 {
+			var parts []string
+			for v, who := range seen {
+				parts = append(parts, fmt.Sprintf("%q (%d runs, e.g. %s)", v, len(who), who[0]))
+			}
+			sort.Strings(parts)
+			problems = append(problems, fmt.Sprintf(
+				"%s differs between runs: %s. These are not %d runs of the same test",
+				field, strings.Join(parts, " vs "), len(rs)))
+			return ""
+		}
+		var only string
+		for v := range seen {
+			only = v
+		}
+		if configValue != "" && only != configValue {
+			problems = append(problems, fmt.Sprintf(
+				"%s: the runs recorded %q but runner.config.json now says %q. The header of this report "+
+					"describes the runs, not the file — and the file has changed since they ran",
+				field, only, configValue))
+		}
+		return only
+	}
+
+	p := provenance{
+		SuiteID: agree("suite_id", func(r *RunResult) string { return r.SuiteID }, ""),
+		HostProfile: agree("host_profile", func(r *RunResult) string { return r.HostProfile },
+			fmt.Sprintf("parallel=%d reclaim_between_runs=%v", cfg.Host.Parallel, cfg.Host.ReclaimBetweenRuns)),
+		BaseSystemSHA: agree("base_system_sha256", func(r *RunResult) string { return r.BaseSystemSHA },
+			cfg.Base.SystemSHA256),
+		BaseDestSHA: agree("base_dest_sha256", func(r *RunResult) string { return r.BaseDestSHA },
+			cfg.Base.DestSHA256),
+		CorpusDigest: agree("corpus_digest", func(r *RunResult) string { return r.CorpusDigest },
+			cfg.Base.CorpusDigest),
+		CorpusProfile: agree("corpus_profile", func(r *RunResult) string { return r.CorpusProfile },
+			cfg.Base.CorpusProfile),
+		CorpusSeed: agree("corpus_seed", func(r *RunResult) string { return fmt.Sprintf("%d", r.CorpusSeed) },
+			fmt.Sprintf("%d", cfg.Base.CorpusSeed)),
+		CorpusFiles: agree("corpus_files", func(r *RunResult) string { return fmt.Sprintf("%d", r.CorpusFiles) },
+			fmt.Sprintf("%d", cfg.Base.CorpusCount)),
+		WindowsEdition: agree("windows_edition", func(r *RunResult) string { return r.WindowsEdition },
+			cfg.Base.WindowsEdition),
+		ISOSource: agree("iso_source", func(r *RunResult) string { return r.ISOSource },
+			cfg.Base.ISOSource),
+		InstallerScope: agree("installer_scope", func(r *RunResult) string { return r.InstallerScope },
+			cfg.InstallerScope),
+	}
+	// corpus_faithful is not a header value, but a suite run against an unfaithful corpus is not the
+	// §6C exit condition and must not be published as one, whatever the config says today.
+	for _, r := range rs {
+		if !r.CorpusFaithful {
+			problems = append(problems, fmt.Sprintf(
+				"run %s recorded corpus_faithful=false: the corpus it ran against had no read-only bits, "+
+					"no alternate data streams and no offline attributes. That is not the §6C exit "+
+					"condition and this report will not be written as though it were", r.RunID))
+			break
+		}
+	}
+	if len(problems) > 0 {
+		return provenance{}, fmt.Errorf("the evidence and the configuration disagree:\n  %s",
+			strings.Join(problems, "\n  "))
+	}
+	return p, nil
+}
+
+// resultDigest is the first 16 hex characters of the SHA-256 of result.json AS WRITTEN.
+//
+// REPORT.md invites an auditor to re-hash the file a row points at. The previous version hashed
+// json.Marshal(r) — a compact re-serialisation of the in-memory struct — while the file on disk was
+// written with json.MarshalIndent plus a trailing newline. Different bytes, different digest, so every
+// digest in the published evidence was unverifiable against the artefact it claimed to identify.
+func resultDigest(r *RunResult) string {
+	if r.sourcePath == "" {
+		return "MISSING"
+	}
+	sum, err := FileSHA256(r.sourcePath)
 	if err != nil {
-		return "(unhashable)"
+		return "(unreadable)"
 	}
 	return sum[:16]
 }

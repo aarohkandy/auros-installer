@@ -59,6 +59,11 @@ func (e *env) opts() Options {
 	o.DestRoot = e.dest
 	o.Quarantine = e.q
 	o.BufSize = 64
+	// A resume is only allowed against a destination whose identity matches the
+	// one that wrote the files. Every test run in this file uses the same
+	// stand-in identity, so an ordinary resume works and the mismatch case has a
+	// test of its own.
+	o.ResumeIdentity = `\\?\Volume{22222222-2222-2222-2222-222222222222}\`
 	return o
 }
 

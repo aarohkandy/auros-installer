@@ -76,8 +76,8 @@ type GuestConfig struct {
 	// The installer contract is that a source file at relative path P appears at DestDataRoot\P.
 	DestDataRoot string
 
-	PollMS int
-	Log    Logger
+	PollMS  int
+	Log     Logger
 	Stop    <-chan struct{}
 	Control io.Writer // serial line to the host; required for SiteHost scenarios
 

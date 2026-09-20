@@ -84,6 +84,75 @@ jobs:
             exit 1
           fi
 
+  testharness:
+    name: testharness (nested module)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      # testharness/ IS ITS OWN GO MODULE (testharness/go.mod), so the `check`
+      # job's `go build ./...` at the repository root does not reach it — a root
+      # module deliberately excludes nested ones. That is how the runner came to
+      # be shipped in a state where it did not compile at all (`v.stderr
+      # undefined`, twice) while README.md described its behaviour in the
+      # present tense. The evidence-producing half of the most dangerous thing
+      # Auros builds had never been through a compiler.
+      #
+      # This job is that gap closed. It is not optional and it is not allowed to
+      # fail: a harness that does not build produces no evidence, and a README
+      # that describes what it enforces is then an untested assertion.
+      - name: go build
+        working-directory: testharness
+        run: go build ./...
+
+      - name: go vet
+        working-directory: testharness
+        run: go vet ./...
+
+      - name: gofmt
+        working-directory: testharness
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "::group::gofmt diff"; gofmt -d .; echo "::endgroup::"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: go test -race
+        # Every test in here is an attack that once worked against this harness:
+        # an installer that writes nothing to the destination and scores 100/100,
+        # a suite where forty runs never started and reports "60/60", a
+        # hand-written result.json counted as a clean pass, a hung installer
+        # scored as a clean abort. -count=1 defeats the test cache, because a
+        # safety suite that did not actually run is worse than no suite.
+        working-directory: testharness
+        run: go test ./... -race -count=1 -v
+
+      # gen, faultagent and bootbeacon run INSIDE the Windows guest. Their
+      # Windows-only files (gen/plat_windows.go, fault/agent_windows.go,
+      # runner/cmd/bootbeacon/evidence_windows.go) are never compiled by the
+      # Linux job above, so this is the only place they are type-checked at all.
+      # 386 as well as amd64: some of the 2012-2018 machines this product exists
+      # for boot a 32-bit Windows.
+      - name: cross-compile the guest binaries
+        working-directory: testharness
+        env:
+          GOOS: windows
+          CGO_ENABLED: "0"
+        run: |
+          for arch in amd64 386; do
+            echo "── windows/$arch ──"
+            GOARCH=$arch go build -trimpath -o /tmp/gen-$arch.exe        ./gen
+            GOARCH=$arch go build -trimpath -o /tmp/faultagent-$arch.exe ./fault/cmd/faultagent
+            GOARCH=$arch go build -trimpath -o /tmp/bootbeacon-$arch.exe ./runner/cmd/bootbeacon
+            GOARCH=$arch go vet ./...
+          done
+
   vuln:
     name: govulncheck
     runs-on: ubuntu-latest

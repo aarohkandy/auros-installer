@@ -30,8 +30,8 @@ func StandardSuite() []Scenario {
 	return []Scenario{
 		// ── family 1: hard power cut ──────────────────────────────────────────────────────────────
 		{
-			ID:      "F01", Family: "power_cut", Name: "Power cut very early in the copy",
-			Site:    SiteHost, Action: ActionPowerCut,
+			ID: "F01", Family: "power_cut", Name: "Power cut very early in the copy",
+			Site: SiteHost, Action: ActionPowerCut,
 			Trigger: Trigger{PhaseCopy, 700},
 			Why: "The first few per cent are where a half-created destination directory tree exists and " +
 				"nothing else. A tool that writes its 'archive complete' marker optimistically writes it here.",
@@ -40,8 +40,8 @@ func StandardSuite() []Scenario {
 				"The run only counts if the progress log proves the copy reached the pin.",
 		},
 		{
-			ID:      "F02", Family: "power_cut", Name: "Power cut at 43% of copied bytes",
-			Site:    SiteHost, Action: ActionPowerCut,
+			ID: "F02", Family: "power_cut", Name: "Power cut at 43% of copied bytes",
+			Site: SiteHost, Action: ActionPowerCut,
 			Trigger: Trigger{PhaseCopy, 4300},
 			Why: "The ordinary case: the machine dies in the middle of a large file, mid-write, with a " +
 				"partially written destination file whose size on disk is not its final size.",
@@ -50,8 +50,8 @@ func StandardSuite() []Scenario {
 				"the Wubi failure. P5 checks that no completion marker exists.",
 		},
 		{
-			ID:      "F03", Family: "power_cut", Name: "Power cut at 94% — almost done",
-			Site:    SiteHost, Action: ActionPowerCut,
+			ID: "F03", Family: "power_cut", Name: "Power cut at 94% — almost done",
+			Site: SiteHost, Action: ActionPowerCut,
 			Trigger: Trigger{PhaseCopy, 9400},
 			Why: "Near-complete is the most dangerous state there is, because it is the state a recovery " +
 				"path is most tempted to round up to complete.",
@@ -60,8 +60,8 @@ func StandardSuite() []Scenario {
 				"having aborted. That is a different product; P1 requires an abort.",
 		},
 		{
-			ID:      "F04", Family: "power_cut", Name: "Power cut halfway through VERIFY",
-			Site:    SiteHost, Action: ActionPowerCut,
+			ID: "F04", Family: "power_cut", Name: "Power cut halfway through VERIFY",
+			Site: SiteHost, Action: ActionPowerCut,
 			Trigger: Trigger{PhaseVerify, 5000},
 			Why: "VERIFY is the last thing between the user and the wall (SAFETY.md phase 5). A crash here " +
 				"leaves a complete-looking archive that has been only half checked.",
@@ -72,8 +72,8 @@ func StandardSuite() []Scenario {
 
 		// ── family 2: destination removed (the USB is pulled) ─────────────────────────────────────
 		{
-			ID:      "F05", Family: "dest_removed", Name: "USB destination yanked mid-copy",
-			Site:    SiteHost, Action: ActionDetachDestination,
+			ID: "F05", Family: "dest_removed", Name: "USB destination yanked mid-copy",
+			Site: SiteHost, Action: ActionDetachDestination,
 			Trigger: Trigger{PhaseCopy, 3800},
 			Why: "Someone walks past the trolley. This is the most common physical failure in a school and " +
 				"it is not an exotic test.",
@@ -82,8 +82,8 @@ func StandardSuite() []Scenario {
 				"device is gone. P5 checks the destination, not the tool's opinion of the destination.",
 		},
 		{
-			ID:      "F06", Family: "dest_removed", Name: "USB destination yanked during VERIFY",
-			Site:    SiteHost, Action: ActionDetachDestination,
+			ID: "F06", Family: "dest_removed", Name: "USB destination yanked during VERIFY",
+			Site: SiteHost, Action: ActionDetachDestination,
 			Trigger: Trigger{PhaseVerify, 4000},
 			Why: "Verification reads from the destination. Losing it mid-verify must abort, not be treated " +
 				"as 'the files we already checked were fine'.",
@@ -94,8 +94,8 @@ func StandardSuite() []Scenario {
 
 		// ── family 3: destination fills ───────────────────────────────────────────────────────────
 		{
-			ID:      "F07", Family: "dest_full", Name: "Destination volume fills at 61%",
-			Site:    SiteGuest, Action: ActionFillDestination,
+			ID: "F07", Family: "dest_full", Name: "Destination volume fills at 61%",
+			Site: SiteGuest, Action: ActionFillDestination,
 			Trigger: Trigger{PhaseCopy, 6100},
 			Params:  map[string]string{"leave_bytes": "0"},
 			Why: "The free-space check in SAFETY.md phase 3 is done once, before the copy. Anything that " +
@@ -106,8 +106,8 @@ func StandardSuite() []Scenario {
 				"is reported as copied is silent data loss at restore time.",
 		},
 		{
-			ID:      "F08", Family: "dest_full", Name: "Destination fills on the very last file",
-			Site:    SiteGuest, Action: ActionFillDestination,
+			ID: "F08", Family: "dest_full", Name: "Destination fills on the very last file",
+			Site: SiteGuest, Action: ActionFillDestination,
 			Trigger: Trigger{PhaseCopy, 9950},
 			Params:  map[string]string{"leave_bytes": "0"},
 			Why: "One file short of complete. The count check passes for 17,999 of 18,000 and the only " +
@@ -119,8 +119,8 @@ func StandardSuite() []Scenario {
 
 		// ── family 4: source mutated under us ─────────────────────────────────────────────────────
 		{
-			ID:      "F09", Family: "source_mutated", Name: "Source file rewritten while it is being copied",
-			Site:    SiteGuest, Action: ActionMutateSource, TargetOffset: 0,
+			ID: "F09", Family: "source_mutated", Name: "Source file rewritten while it is being copied",
+			Site: SiteGuest, Action: ActionMutateSource, TargetOffset: 0,
 			Trigger: Trigger{PhaseCopy, 2900},
 			Why: "A live machine. The user has a document open and saves it, or a sync client rewrites it. " +
 				"SAFETY.md phase 4 hashes DURING the copy for this exact reason — hashing the source " +
@@ -131,8 +131,8 @@ func StandardSuite() []Scenario {
 				"but it would also 'notice' on a file it had copied perfectly.",
 		},
 		{
-			ID:      "F10", Family: "source_mutated", Name: "Source file rewritten after copy, before verify",
-			Site:    SiteGuest, Action: ActionMutateSource, TargetOffset: -40,
+			ID: "F10", Family: "source_mutated", Name: "Source file rewritten after copy, before verify",
+			Site: SiteGuest, Action: ActionMutateSource, TargetOffset: -40,
 			Trigger: Trigger{PhaseCopy, 9900},
 			Why: "The window between COPY and VERIFY. A verify implemented as 'compare destination against " +
 				"a fresh read of the source' fails here on a file that was copied correctly, and would " +
@@ -146,8 +146,8 @@ func StandardSuite() []Scenario {
 
 		// ── family 5: source deleted under us ─────────────────────────────────────────────────────
 		{
-			ID:      "F11", Family: "source_deleted", Name: "Source file deleted just ahead of the copy",
-			Site:    SiteGuest, Action: ActionDeleteSource, TargetOffset: 12,
+			ID: "F11", Family: "source_deleted", Name: "Source file deleted just ahead of the copy",
+			Site: SiteGuest, Action: ActionDeleteSource, TargetOffset: 12,
 			Trigger: Trigger{PhaseCopy, 3300},
 			Why: "Temp files, browser cache, a user emptying Downloads while the tool runs. The inventory " +
 				"is a snapshot; the disk is not.",
@@ -156,8 +156,8 @@ func StandardSuite() []Scenario {
 				"count to match what was achieved, which makes the count check tautological.",
 		},
 		{
-			ID:      "F12", Family: "source_deleted", Name: "Source file deleted before its copy begins",
-			Site:    SiteGuest, Action: ActionDeleteSource, TargetOffset: 4000,
+			ID: "F12", Family: "source_deleted", Name: "Source file deleted before its copy begins",
+			Site: SiteGuest, Action: ActionDeleteSource, TargetOffset: 4000,
 			Trigger: Trigger{PhaseCopy, 100},
 			Why: "Same family, but the gap between inventory and copy is as wide as it gets. The installer " +
 				"must report the discrepancy against the inventory it showed the user, not against what it " +
@@ -169,8 +169,8 @@ func StandardSuite() []Scenario {
 
 		// ── family 6: manifest damaged ────────────────────────────────────────────────────────────
 		{
-			ID:      "F13", Family: "manifest_damaged", Name: "Manifest truncated mid-record",
-			Site:    SiteGuest, Action: ActionTruncateManifest,
+			ID: "F13", Family: "manifest_damaged", Name: "Manifest truncated mid-record",
+			Site: SiteGuest, Action: ActionTruncateManifest,
 			Trigger: Trigger{PhaseCopy, 8000},
 			Params:  map[string]string{"keep_fraction_bp": "6000"},
 			Why: "The manifest is the only thing that makes the archive verifiable. A truncated one must " +
@@ -181,8 +181,8 @@ func StandardSuite() []Scenario {
 				"contiguous-index check instead.",
 		},
 		{
-			ID:      "F14", Family: "manifest_damaged", Name: "Manifest truncated to zero bytes before verify",
-			Site:    SiteGuest, Action: ActionTruncateManifest,
+			ID: "F14", Family: "manifest_damaged", Name: "Manifest truncated to zero bytes before verify",
+			Site: SiteGuest, Action: ActionTruncateManifest,
 			Trigger: Trigger{PhaseCopy, 9990},
 			Params:  map[string]string{"keep_fraction_bp": "0"},
 			Why: "An empty manifest verifies vacuously against anything. Zero files compared, zero " +
@@ -194,8 +194,8 @@ func StandardSuite() []Scenario {
 
 		// ── family 7: silent corruption ───────────────────────────────────────────────────────────
 		{
-			ID:      "F15", Family: "bit_flip", Name: "Single bit flipped in an already-copied file",
-			Site:    SiteGuest, Action: ActionBitFlip, TargetOffset: -60,
+			ID: "F15", Family: "bit_flip", Name: "Single bit flipped in an already-copied file",
+			Site: SiteGuest, Action: ActionBitFlip, TargetOffset: -60,
 			Trigger: Trigger{PhaseCopy, 5500},
 			Why: "Bad USB stick, bad cable, bad RAM. One bit. This is what per-file hashing is FOR, and it " +
 				"is the check most likely to be quietly downgraded to a size comparison for speed.",
@@ -204,8 +204,8 @@ func StandardSuite() []Scenario {
 				"instead of re-reading from the destination, cannot see this at all and passes.",
 		},
 		{
-			ID:      "F16", Family: "bit_flip", Name: "Single bit flipped inside the manifest",
-			Site:    SiteGuest, Action: ActionBitFlip,
+			ID: "F16", Family: "bit_flip", Name: "Single bit flipped inside the manifest",
+			Site: SiteGuest, Action: ActionBitFlip,
 			Trigger: Trigger{PhaseCopy, 7700},
 			Params:  map[string]string{"target": "manifest"},
 			Why: "Corrupting the record rather than the data. One flipped hex digit in one stored hash and " +
@@ -217,8 +217,8 @@ func StandardSuite() []Scenario {
 
 		// ── family 8: the clock ───────────────────────────────────────────────────────────────────
 		{
-			ID:      "F17", Family: "clock_backwards", Name: "System clock jumps backwards mid-copy",
-			Site:    SiteGuest, Action: ActionClockBackwards,
+			ID: "F17", Family: "clock_backwards", Name: "System clock jumps backwards mid-copy",
+			Site: SiteGuest, Action: ActionClockBackwards,
 			Trigger: Trigger{PhaseCopy, 5000},
 			Params:  map[string]string{"seconds": "86400"},
 			Why: "A dead CMOS battery on a 2013 laptop is not an edge case, it is the cohort. On these " +
@@ -231,8 +231,8 @@ func StandardSuite() []Scenario {
 				"installer must use a monotonic clock and content hashes, not wall time.",
 		},
 		{
-			ID:      "F18", Family: "clock_backwards", Name: "Clock jumps backwards across the COPY/VERIFY boundary",
-			Site:    SiteGuest, Action: ActionClockBackwards,
+			ID: "F18", Family: "clock_backwards", Name: "Clock jumps backwards across the COPY/VERIFY boundary",
+			Site: SiteGuest, Action: ActionClockBackwards,
 			Trigger: Trigger{PhaseVerify, 1000},
 			Params:  map[string]string{"seconds": "315360000"},
 			Why: "Ten years backwards, at the moment verification starts. Any timestamp-based freshness " +
@@ -244,8 +244,8 @@ func StandardSuite() []Scenario {
 
 		// ── family 9: antivirus ───────────────────────────────────────────────────────────────────
 		{
-			ID:      "F19", Family: "av_lock", Name: "Antivirus takes an exclusive handle on a file not yet copied",
-			Site:    SiteGuest, Action: ActionExclusiveLock, TargetOffset: 25,
+			ID: "F19", Family: "av_lock", Name: "Antivirus takes an exclusive handle on a file not yet copied",
+			Site: SiteGuest, Action: ActionExclusiveLock, TargetOffset: 25,
 			Trigger: Trigger{PhaseCopy, 2200},
 			Params:  map[string]string{"hold_ms": "120000"},
 			Why: "Real-time scanning opens files with no sharing. On the machines we target, the antivirus " +
@@ -256,8 +256,8 @@ func StandardSuite() []Scenario {
 				"a skipped file plus a reduced expected count looks identical to a clean run.",
 		},
 		{
-			ID:      "F20", Family: "av_lock", Name: "Antivirus locks a file on the destination during verify",
-			Site:    SiteGuest, Action: ActionExclusiveLock, TargetOffset: -100,
+			ID: "F20", Family: "av_lock", Name: "Antivirus locks a file on the destination during verify",
+			Site: SiteGuest, Action: ActionExclusiveLock, TargetOffset: -100,
 			Trigger: Trigger{PhaseVerify, 6600},
 			Params:  map[string]string{"hold_ms": "120000", "target": "destination"},
 			Why: "Verification has to re-read every file from the destination. An antivirus scanning the " +
@@ -303,9 +303,9 @@ func Validate() error {
 		return fmt.Errorf("the suite has %d scenarios; spec §6C requires 20 induced-failure runs", len(suite))
 	}
 	known := map[Action]bool{
-		ActionPowerCut:     true, ActionDetachDestination: true, ActionFillDestination: true,
+		ActionPowerCut: true, ActionDetachDestination: true, ActionFillDestination: true,
 		ActionMutateSource: true, ActionDeleteSource: true, ActionTruncateManifest: true,
-		ActionBitFlip:      true, ActionClockBackwards: true, ActionExclusiveLock: true,
+		ActionBitFlip: true, ActionClockBackwards: true, ActionExclusiveLock: true,
 	}
 	seen := map[string]bool{}
 	fams := map[string]int{}

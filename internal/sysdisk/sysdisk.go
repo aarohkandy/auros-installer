@@ -47,7 +47,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -174,7 +173,10 @@ func renderArgv(argv []string) string {
 	parts := make([]string, 0, len(argv))
 	for _, a := range argv {
 		if a == "" || strings.ContainsAny(a, " \t\"") {
-			a = strconv.Quote(a)
+			// Windows quoting, not Go quoting: strconv.Quote would escape every
+			// backslash in a path and the line shown to the user would not be the
+			// line they could type. Only an embedded quote needs escaping.
+			a = `"` + strings.ReplaceAll(a, `"`, `\"`) + `"`
 		}
 		parts = append(parts, a)
 	}

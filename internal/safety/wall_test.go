@@ -1,12 +1,15 @@
 package safety
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -85,27 +88,219 @@ func TestWall_OnlySafetyImportsSysdisk(t *testing.T) {
 	}
 }
 
-// TestWall_OnlySysdiskRunsCommands is the second half. A package that does not
-// import internal/sysdisk can still shell out to manage-bde or bcdedit and touch
-// the system disk that way, so os/exec is confined to the same one package.
-func TestWall_OnlySysdiskRunsCommands(t *testing.T) {
+// TestWall_ForbiddenImports is the second half, and it is wider than it used to
+// be on purpose.
+//
+// The previous version confined os/exec to internal/sysdisk and its comment
+// claimed that closed the category: "that is how the system disk gets touched
+// without importing it". It closed one of the two doors. The other one is
+// `syscall`: syscall.NewLazyDLL plus `unsafe` is the ability to call any Win32
+// export — DeleteFileW, SetFirmwareEnvironmentVariableW — from any package,
+// without importing internal/sysdisk and without importing os/exec.
+//
+// `unsafe` is also the one tool that can forge a safety.VerifiedArchive. The
+// type's unexported fields stop every safe-Go path: a literal, a setter,
+// embedding, encoding/json, and reflection (which sets flagRO and panics on
+// SetBool). Two pointer writes through unsafe.Pointer do not care about any of
+// that. So the guarantee in verified.go is "cannot be constructed by any
+// safe-Go path, and the unsafe path is forbidden by this test", and this is the
+// test it names.
+//
+// Allowing a package here is a change to the safety architecture. Each entry
+// below carries the reason it exists.
+func TestWall_ForbiddenImports(t *testing.T) {
 	root := repoRoot(t)
-	allowed := map[string]bool{"internal/sysdisk": true}
 
+	// import path -> the packages allowed to have it
+	type rule struct {
+		why     string
+		allowed map[string]bool
+	}
+	rules := map[string]rule{
+		"os/exec": {
+			why:     "running external commands is how the system disk gets touched without importing internal/sysdisk",
+			allowed: map[string]bool{"internal/sysdisk": true},
+		},
+		// `syscall` is not banned by import path, because errno and signal
+		// CONSTANTS are ordinary values that phase 1-5 code legitimately needs
+		// (ENOSPC is how a full destination is recognised). It is banned by
+		// IDENTIFIER instead, in TestWall_SyscallIsConstantsOnly below, which is
+		// the check that actually matters: the danger is syscall.NewLazyDLL and
+		// syscall.Syscall, not syscall.ENOSPC.
+		"x-sys": {
+			why:     "golang.org/x/sys is syscall by another name and gets the same treatment",
+			allowed: map[string]bool{"internal/winenv": true, "internal/sysdisk": true},
+		},
+		"unsafe": {
+			why: "unsafe is the only way to forge a VerifiedArchive, and the only way to pass a " +
+				"pointer to a Win32 call; it belongs where Win32 lives and nowhere else",
+			allowed: map[string]bool{"internal/winenv": true},
+		},
+	}
+
+	// Packages that must never have ANY of the above, whatever the rules say.
+	// internal/safety mints the proof; phases 1-5 are read-only with respect to
+	// the system disk.
+	sealed := map[string]bool{
+		"internal/safety":     true,
+		"internal/manifest":   true,
+		"internal/copyengine": true,
+		"internal/verify":     true,
+		"internal/quarantine": true,
+		"internal/runlog":     true,
+	}
+
+	seen := map[string]bool{}
 	walkGoFiles(t, root, func(relPath string, imports []string) {
 		pkgDir := filepath.ToSlash(filepath.Dir(relPath))
-		if allowed[pkgDir] {
-			return
-		}
 		for _, imp := range imports {
-			if imp == "os/exec" {
-				t.Errorf("WALL BREACH: package %q imports os/exec (in %s)\n"+
-					"  Running external commands is confined to internal/sysdisk, "+
-					"because that is how the system disk gets touched without importing it.",
-					pkgDir, relPath)
+			base := imp
+			if strings.HasPrefix(imp, "golang.org/x/sys/") {
+				base = "x-sys" // the same capability under another name
+			}
+			r, guarded := rules[base]
+			if !guarded {
+				continue
+			}
+			seen[base] = true
+			if sealed[pkgDir] {
+				t.Errorf("WALL BREACH: sealed package %q imports %q (in %s)\n  %s",
+					pkgDir, imp, relPath, r.why)
+				continue
+			}
+			if !r.allowed[pkgDir] {
+				t.Errorf("WALL BREACH: package %q imports %q (in %s)\n  %s\n  Allowed only in: %s",
+					pkgDir, imp, relPath, r.why, strings.Join(sortedKeys(r.allowed), ", "))
 			}
 		}
 	})
+
+	// A wall that passes because nothing matched is not a wall. At least one
+	// legitimate use of each guarded import must actually exist. x-sys is
+	// exempt: the module has no external dependencies and must not acquire one.
+	for imp := range rules {
+		if imp == "x-sys" {
+			continue
+		}
+		if !seen[imp] {
+			t.Errorf("no file in the repository imports %q: either it moved or this test is vacuous", imp)
+		}
+	}
+}
+
+// TestWall_SyscallIsConstantsOnly is the identifier-level half of the wall.
+//
+// Banning the `syscall` import outright would ban syscall.ENOSPC, which is how
+// the copy engine recognises a full destination — a phase 4 concern with nothing
+// to do with the system disk. Banning it nowhere leaves syscall.NewLazyDLL
+// available from any package, and NewLazyDLL plus unsafe is the ability to call
+// DeleteFileW or SetFirmwareEnvironmentVariableW without importing
+// internal/sysdisk and without importing os/exec.
+//
+// So the constants are allowed everywhere and everything else is allowed only in
+// the two packages whose job is Win32. Aliased imports are resolved first, so
+// `import s "syscall"` is checked exactly the same way.
+func TestWall_SyscallIsConstantsOnly(t *testing.T) {
+	root := repoRoot(t)
+	mayCallWin32 := map[string]bool{"internal/winenv": true, "internal/sysdisk": true}
+
+	// Errno and signal constants: pure values, no capability attached.
+	constant := regexp.MustCompile(`^(SIG[A-Z0-9]+|E[A-Z0-9]+|Errno)$`)
+
+	fset := token.NewFileSet()
+	checked, sawConstantUse := 0, false
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "testdata", "vendor", "node_modules":
+				return fs.SkipDir
+			}
+			rel, rerr := filepath.Rel(root, p)
+			if rerr == nil && rel != "." {
+				top := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+				if top != "internal" && top != "cmd" {
+					if _, serr := os.Stat(filepath.Join(p, "go.mod")); serr == nil {
+						return fs.SkipDir
+					}
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			return rerr
+		}
+		pkgDir := filepath.ToSlash(filepath.Dir(rel))
+		if mayCallWin32[pkgDir] {
+			return nil
+		}
+		f, perr := parser.ParseFile(fset, p, nil, 0)
+		if perr != nil {
+			t.Errorf("parsing %s: %v", rel, perr)
+			return nil
+		}
+		// Resolve whatever local name syscall was bound to in THIS file.
+		local := ""
+		for _, spec := range f.Imports {
+			path, uerr := strconv.Unquote(spec.Path.Value)
+			if uerr != nil {
+				continue
+			}
+			if path != "syscall" && !strings.HasPrefix(path, "golang.org/x/sys/") {
+				continue
+			}
+			local = "syscall"
+			if spec.Name != nil {
+				local = spec.Name.Name
+			}
+		}
+		if local == "" {
+			return nil
+		}
+		checked++
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			id, ok := sel.X.(*ast.Ident)
+			if !ok || id.Name != local {
+				return true
+			}
+			if constant.MatchString(sel.Sel.Name) {
+				sawConstantUse = true
+				return true
+			}
+			t.Errorf("WALL BREACH: package %q uses syscall.%s (in %s)\n"+
+				"  Outside internal/winenv and internal/sysdisk, only errno and signal "+
+				"constants may be taken from syscall. Anything else is a path to every "+
+				"Win32 export from a package the wall does not watch.",
+				pkgDir, sel.Sel.Name, rel)
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	if checked == 0 || !sawConstantUse {
+		t.Fatal("no package outside internal/winenv and internal/sysdisk uses syscall at all: this test is vacuous")
+	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestWall_NonDestructivePackagesAreClean asserts that the phase 1–5 packages —

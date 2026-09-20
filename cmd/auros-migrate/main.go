@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aarohkandy/auros-installer/internal/copyengine"
@@ -27,6 +26,7 @@ import (
 	"github.com/aarohkandy/auros-installer/internal/quarantine"
 	"github.com/aarohkandy/auros-installer/internal/runlog"
 	"github.com/aarohkandy/auros-installer/internal/safety"
+	"github.com/aarohkandy/auros-installer/internal/signals"
 	"github.com/aarohkandy/auros-installer/internal/winenv"
 )
 
@@ -50,6 +50,7 @@ type config struct {
 	acknowledged bool
 	bootMedia    string
 	restart      bool
+	placeholders string
 	maxFileBytes int64
 	bufSize      int
 }
@@ -79,6 +80,8 @@ func run() error {
 	fs.BoolVar(&cfg.resume, "resume", false, "reuse files already copied by an interrupted run")
 	fs.BoolVar(&cfg.acknowledged, "i-understand-programs-do-not-migrate", false,
 		"confirm you have read the list of programs that will NOT come across")
+	fs.StringVar(&cfg.placeholders, "cloud-files", "",
+		"what to do about OneDrive Files On-Demand placeholders: hydrate (download them now) or skip (leave them in the cloud)")
 	fs.StringVar(&cfg.bootMedia, "boot-media", "", "firmware boot entry for install media you already made")
 	fs.BoolVar(&cfg.restart, "restart", false, "restart at the end of a committed run")
 	fs.Int64Var(&cfg.maxFileBytes, "max-file-bytes", 0, "quarantine files larger than this (0 = no limit)")
@@ -92,7 +95,7 @@ func run() error {
 		mode = safety.ModeCommit
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), signals.Interrupting()...)
 	defer stop()
 
 	env := winenv.New()
@@ -132,6 +135,23 @@ func run() error {
 	}
 	fmt.Printf("\n  %d files, %s\n", fileCount, humanBytes(inventoryBytes))
 
+	// SAFETY.md phase 1: OneDrive Files On-Demand is a first-class case. The
+	// placeholders are counted and the choice is the user's, made BEFORE the run
+	// starts — not discovered forty minutes in, after a school uplink has been
+	// saturated by a hydration nobody agreed to.
+	ph, perr := countPlaceholders(env, sources)
+	if perr != nil {
+		return fmt.Errorf("inventory: counting cloud placeholders: %w", perr)
+	}
+	choice, cerr := placeholderChoice(ph, cfg.placeholders)
+	if cerr != nil {
+		return cerr
+	}
+	if ph.Count > 0 {
+		inventoryBytes = adjustForPlaceholders(inventoryBytes, ph, choice)
+		fmt.Printf("  after your choice (%s): %s to copy\n", choice, humanBytes(inventoryBytes))
+	}
+
 	// ---- phase 2: DISCLOSE (reads only) ----
 	if err := m.Advance(safety.PhaseDisclose); err != nil {
 		return err
@@ -156,30 +176,42 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("destination: cannot identify the system volume: %w", err)
 	}
-	dest, err := resolveDestination(env, sysVol, cfg.dest, inventoryBytes)
+	resolver := safety.NewResolver(env, sysVol)
+	dest, err := resolveDestination(resolver, cfg.dest, inventoryBytes)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("  destination : %s\n", dest.Dir)
-	fmt.Printf("  volume      : %s\n", dest.Volume.GUID)
+	if abs, aerr := filepath.Abs(cfg.dest); cfg.dest != "" && aerr == nil && abs != dest.Dir() {
+		// The path the user typed was a link. Say so: they asked for one place
+		// and the files are going to another.
+		fmt.Printf("  NOTE: %s is a link; it resolves to %s, and that is where the files go.\n", abs, dest.Dir())
+	}
+	fmt.Printf("  destination : %s\n", dest.Dir())
+	fmt.Printf("  volume      : %s\n", dest.Volume().GUID)
 	fmt.Printf("  free        : %s (needs %s)\n",
-		humanBytes(int64(dest.Volume.FreeBytes)), humanBytes(safety.RequiredBytes(inventoryBytes)))
+		humanBytes(int64(dest.Volume().FreeBytes)), humanBytes(safety.RequiredBytes(inventoryBytes)))
 
-	logOpts := runlog.Options{}
-	logOpts.DestRoot = dest.Dir
-	logOpts.DestIsSystemVolume = safety.SameVolume(dest.Volume, sysVol)
-	log, err := runlog.Open(logOpts)
+	log, err := runlog.Open(dest.RunlogOptions())
 	if err != nil {
 		return fmt.Errorf("destination: %w", err)
 	}
 	defer log.Close()
 	fmt.Printf("  run log     : %s\n", log.Path())
 	log.Event(safety.PhaseDestination.String(), "chosen", runlog.Fields{
-		"dir":        dest.Dir,
-		"free_bytes": dest.Volume.FreeBytes,
-		"mode":       mode.String(),
-		"platform":   env.Platform(),
-		"volume":     dest.Volume.GUID,
+		"dir":               dest.Dir(),
+		"requested":         cfg.dest,
+		"free_bytes":        dest.Volume().FreeBytes,
+		"mode":              mode.String(),
+		"platform":          env.Platform(),
+		"volume":            dest.Volume().GUID,
+		"on_system_volume":  dest.OnSystemVolume(),
+		"cloud_placeholder": choice,
+	})
+	log.Event(safety.PhaseInventory.String(), "cloud-placeholders", runlog.Fields{
+		"count":         ph.Count,
+		"logical_bytes": ph.LogicalSize,
+		"on_disk_bytes": ph.OnDiskSize,
+		"choice":        choice,
 	})
 
 	// ---- phase 4: COPY (writes only to the destination) ----
@@ -191,7 +223,9 @@ func run() error {
 
 	copyOpts := copyengine.Options{}
 	copyOpts.Sources = sources
-	copyOpts.DestRoot = dest.Dir
+	copyOpts.DestRoot = dest.Dir()
+	copyOpts.AssertDestination = dest.Reassert
+	copyOpts.ResumeIdentity = dest.Volume().GUID
 	copyOpts.Quarantine = q
 	copyOpts.Log = log
 	copyOpts.BufSize = cfg.bufSize
@@ -204,15 +238,15 @@ func run() error {
 	if cerr != nil {
 		m.Abort("copy: " + cerr.Error())
 		printQuarantine(q)
-		return fmt.Errorf("copy: %w (nothing was written to the system disk)", cerr)
+		return fmt.Errorf("copy: %w (every byte went under %s; the system disk was not written to: %v)",
+			cerr, dest.Dir(), !dest.OnSystemVolume())
 	}
 
 	// ---- phase 5: VERIFY (reads only) ----
 	section(mode, safety.PhaseVerify)
 	vreq := safety.VerifyRequest{}
-	vreq.DestRoot = dest.Dir
-	vreq.DestVolumeGUID = dest.Volume.GUID
-	vreq.SystemVolumeGUID = sysVol.GUID
+	vreq.Dest = dest
+	vreq.System = sysVol
 	vreq.Manifest = cres.Manifest
 	vreq.Quarantine = q
 	vreq.Log = log
@@ -229,16 +263,24 @@ func run() error {
 		return fmt.Errorf("verify: %w", verr)
 	}
 	printQuarantine(q)
-	fmt.Printf("\n  %d files now exist in two places. The system disk has not been written to.\n",
-		archive.FileCount())
+	// Measured, not asserted: the destination's resolved path is re-identified
+	// and its volume compared against the system volume, right now.
+	if dest.OnSystemVolume() {
+		return errors.New("verify: the archive is on the system volume; that is not a second copy")
+	}
+	fmt.Printf("\n  %d files now exist in two places, and the system disk has not been written to\n"+
+		"  (checked just now: %s is on %s, the system volume is %s).\n",
+		archive.FileCount(), dest.Dir(), dest.Volume().GUID, sysVol.GUID)
 	fmt.Printf("  archive: %s\n  digest : %s\n", archive.Root(), archive.ManifestDigest())
 
 	// ---- phase 6: ARM (the wall) ----
 	section(mode, safety.PhaseArm)
 	areq := safety.ArmRequest{}
-	areq.SystemVolumeGUID = sysVol.GUID
-	areq.SystemMount = sysVol.Mount
-	areq.BitLockerProtected = fw.BitLockerOnSystemVolume == winenv.Yes
+	// Not "== Yes". Unknown must behave like Yes: the suspend step is planned
+	// unless BitLocker is positively known to be off, and the volume and mount
+	// the steps act on come from the VerifiedArchive rather than from here.
+	areq.BitLocker = fw.BitLockerOnSystemVolume
+	areq.FirmwareKnown = fw.Known
 	areq.BootMediaGUID = cfg.bootMedia
 	areq.Restart = cfg.restart && cfg.commit
 	areq.Log = log
@@ -397,71 +439,99 @@ func measure(sources []copyengine.Source) (int64, int, error) {
 }
 
 // resolveDestination turns a --dest path into a Destination whose volume
-// identity is known. It refuses rather than guessing: a destination whose volume
-// cannot be identified cannot be proven not to be the system disk.
-func resolveDestination(env winenv.Env, sysVol winenv.Volume, destFlag string, inventoryBytes int64) (safety.Destination, error) {
-	vols, err := env.Volumes()
-	if err != nil {
-		return safety.Destination{}, fmt.Errorf("destination: %w", err)
-	}
-
+// identity has been PROVEN, or refuses.
+//
+// It does almost nothing itself, and that is the fix. The previous version
+// lowercased the path, compared it against the drive roots with a string prefix
+// test, and reported the GUID of the drive LETTER — so a junction at
+// `D:\backup` pointing to `C:\AurosBackup` reported D:, passed every check, and
+// put the user's only copy on the disk the tool was about to repoint. The volume
+// of a directory is a question only the operating system can answer, and
+// safety.Resolver is the one place that asks it.
+func resolveDestination(r *safety.Resolver, destFlag string, inventoryBytes int64) (safety.Destination, error) {
 	if destFlag != "" {
-		abs, aerr := filepath.Abs(destFlag)
-		if aerr != nil {
-			return safety.Destination{}, aerr
+		d, err := r.Resolve(destFlag, inventoryBytes)
+		if err != nil {
+			return safety.Destination{}, fmt.Errorf("destination: %w", err)
 		}
-		if v, ok := volumeFor(vols, abs); ok {
-			d := safety.Destination{Volume: v, Dir: abs}
-			return d, safety.CheckDestination(d, sysVol, inventoryBytes)
-		}
-		if env.Platform() == "windows" {
-			return safety.Destination{}, fmt.Errorf(
-				"destination: cannot identify the volume holding %s; refusing to continue", abs)
-		}
-		// Synthetic platform: fabricate an identity, and say so loudly. This
-		// path exists so the whole pipeline can be rehearsed on Linux. It is
-		// never reachable on Windows.
-		v := winenv.Volume{}
-		v.GUID = "synthetic:" + abs
-		v.Mount = abs
-		v.FS = "synthetic"
-		v.FreeBytes = uint64(safety.RequiredBytes(inventoryBytes)) * 4
-		v.TotalBytes = v.FreeBytes
-		fmt.Printf("  NOTE: volume identity for %s is SYNTHETIC (%s)\n", abs, v.GUID)
-		d := safety.Destination{Volume: v, Dir: abs}
-		return d, safety.CheckDestination(d, sysVol, inventoryBytes)
+		return d, nil
 	}
-
-	var cands []safety.Destination
-	for _, v := range vols {
-		cands = append(cands, safety.Destination{Volume: v, Dir: filepath.Join(v.Mount, "auros-backup")})
-	}
-	chosen, rejected, cerr := safety.ChooseDestination(cands, sysVol, inventoryBytes)
+	d, rejected, err := r.Choose("auros-backup", inventoryBytes)
 	if s := safety.DescribeRejections(rejected); s != "" {
 		fmt.Print("\n" + s)
 	}
-	if cerr != nil {
-		return safety.Destination{}, cerr
+	if err != nil {
+		return safety.Destination{}, fmt.Errorf("destination: %w", err)
 	}
-	if err := os.MkdirAll(chosen.Dir, 0o755); err != nil {
-		return safety.Destination{}, err
-	}
-	return chosen, nil
+	return d, nil
 }
 
-func volumeFor(vols []winenv.Volume, path string) (winenv.Volume, bool) {
-	var best winenv.Volume
-	found := false
-	for _, v := range vols {
-		if v.Mount == "" {
-			continue
+// ---- phase 1: OneDrive Files On-Demand ----
+
+// countPlaceholders sums the cloud placeholders across every source root.
+func countPlaceholders(env winenv.Env, sources []copyengine.Source) (winenv.PlaceholderStats, error) {
+	var total winenv.PlaceholderStats
+	for _, s := range sources {
+		st, err := env.CloudPlaceholders(s.Root)
+		if err != nil {
+			return winenv.PlaceholderStats{}, err
 		}
-		if !strings.HasPrefix(strings.ToLower(path), strings.ToLower(v.Mount)) {
-			continue
-		}
-		if !found || len(v.Mount) > len(best.Mount) {
-			best, found = v, true
-		}
+		total.Count += st.Count
+		total.LogicalSize += st.LogicalSize
+		total.OnDiskSize += st.OnDiskSize
 	}
-	return best, found
+	return total, nil
+}
+
+// placeholderChoice prints what was found and requires the user to have made a
+// choice. SAFETY.md phase 1: "their choice, stated in plain words, between
+// hydrating (slow, may not fit) and leaving them in the cloud". A run that finds
+// placeholders and was not told which to do stops here, before anything is
+// copied and before a school's uplink is saturated.
+func placeholderChoice(ph winenv.PlaceholderStats, flag string) (string, error) {
+	flag = strings.ToLower(strings.TrimSpace(flag))
+	if ph.Count == 0 {
+		fmt.Println("\n  no OneDrive Files On-Demand placeholders were found.")
+		if flag == "" {
+			return "none-found", nil
+		}
+		return flag, nil
+	}
+	fmt.Printf("\n  ONEDRIVE FILES ON-DEMAND\n")
+	fmt.Printf("  %d of your files are placeholders: the name is on this laptop, the contents are not.\n", ph.Count)
+	if ph.OnDiskSize > 0 {
+		fmt.Printf("  They take %s here and would be %s once downloaded.\n",
+			humanBytes(ph.OnDiskSize), humanBytes(ph.LogicalSize))
+	} else {
+		fmt.Printf("  They take almost nothing here and would be %s once downloaded.\n",
+			humanBytes(ph.LogicalSize))
+	}
+	fmt.Println("  You choose, and you choose now rather than forty minutes into the copy:")
+	fmt.Println("    --cloud-files=hydrate   download them all now. Slow on a school connection,")
+	fmt.Println("                            and they have to fit on the backup drive.")
+	fmt.Println("    --cloud-files=skip      leave them in the cloud. They are already in two")
+	fmt.Println("                            places, which is the whole point of the rule, and")
+	fmt.Println("                            they are listed in the report so you can see them.")
+	switch flag {
+	case "hydrate", "skip":
+		return flag, nil
+	case "":
+		return "", errors.New("inventory: choose what happens to the cloud placeholders with --cloud-files=hydrate or --cloud-files=skip")
+	default:
+		return "", fmt.Errorf("inventory: --cloud-files=%q: expected hydrate or skip", flag)
+	}
+}
+
+// adjustForPlaceholders corrects the space estimate for the choice that was
+// made. measure() sums logical sizes, which is the hydrated size; skipping means
+// those bytes are not copied at all.
+func adjustForPlaceholders(inventoryBytes int64, ph winenv.PlaceholderStats, choice string) int64 {
+	if choice != "skip" {
+		return inventoryBytes
+	}
+	adjusted := inventoryBytes - ph.LogicalSize
+	if adjusted < 0 {
+		return 0
+	}
+	return adjusted
 }

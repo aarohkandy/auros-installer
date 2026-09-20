@@ -54,9 +54,9 @@ type VerifiedArchive struct {
 	// be two different things.
 	systemMount    string
 	manifestDigest string
-	fileCount        int
-	totalBytes       int64
-	verifiedAt       time.Time
+	fileCount      int
+	totalBytes     int64
+	verifiedAt     time.Time
 }
 
 // ok reports whether this value came from a successful verification. Unexported

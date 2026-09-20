@@ -358,11 +358,12 @@ func (r *Resolver) Resolve(dir string, inventoryBytes int64) (Destination, error
 	if err != nil {
 		return Destination{}, fmt.Errorf("%w: %s: %v", ErrDestinationUnresolvable, dir, err)
 	}
-	target, vol, err := r.inspect(abs, inventoryBytes)
+	// The ancestor's identity gates the creation; the destination's own identity
+	// is taken from scratch below, after it exists.
+	target, _, err := r.inspect(abs, inventoryBytes)
 	if err != nil {
 		return Destination{}, err
 	}
-	_ = vol // the ancestor's identity gated the creation; the real one is taken below
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return Destination{}, fmt.Errorf("safety: creating the destination %s: %w", target, err)
 	}

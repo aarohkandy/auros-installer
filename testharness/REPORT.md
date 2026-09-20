@@ -47,11 +47,17 @@ without it would imply phases this suite did not run.
 | Corpus digest | `{{CORPUS_DIGEST}}` |
 | Host profile | `{{HOST_PROFILE}}` |
 
-The base image is built once and never written to again. Its SHA-256 is verified **before and after every
-single run**; if it ever changed, every result recorded afterwards would be measured against a different
-operating system than the ones before it, and "100 consecutive runs" would be 100 runs of different
-things. The corpus is baked into that base image, so the digest above is covered by the image hash rather
-than asserted separately.
+Every value in this table is read out of the **run results**, not out of a configuration file, and every
+run in the suite had to agree on it. `runner report` refuses to write this document if two runs disagree,
+or if any of them disagrees with `runner.config.json` as it reads now. A header assembled at report time
+from a file that can be edited afterwards is a claim about that file, not about the runs.
+
+Both base images are built once and never written to again. Their SHA-256 **and their file modes** are
+verified **before and after every single run**; if either ever changed, every result recorded afterwards
+would be measured against a different machine than the ones before it, and "100 consecutive runs" would
+be 100 runs of different things. It is both images because a destination base that is no longer empty
+makes a broken copy look complete. The corpus is baked into the system base image, so the digest above is
+covered by the image hash rather than asserted separately.
 
 A corpus regenerated from seed `{{CORPUS_SEED}}` on any machine, on any day, hashes to
 `{{CORPUS_DIGEST}}`. That is the whole reason a failure in this suite is reproducible.
@@ -64,33 +70,47 @@ A corpus regenerated from seed `{{CORPUS_SEED}}` on any machine, on any day, has
 | **P1** | The installer aborted (or, for F10/F17/F18, correctly continued). |
 | **P2** | The system disk's boot-critical region is byte-identical: first 1 MiB of PhysicalDrive0, the full BCD enumeration, and the firmware boot entry. *SAFETY.md phase 6 is the only code permitted to change any of it. This is "the wall was not crossed" as a measurement rather than as the installer's own opinion.* |
 | **P3** | Windows still boots normally — beacon from a logged-on session, no bugcheck, no blocking chkdsk, no Recovery Environment, within the normal-boot ceiling. |
-| **P4** | Zero files lost, zero corrupted: all {{CORPUS_COUNT}} source files re-hashed against the golden manifest after the run, aborted or not. |
-| **P5** | No archive claims to be complete after an abort. |
-| **P6** | The immutable base image is unchanged after the run. |
+| **P4** | Zero files lost, zero corrupted: all {{CORPUS_COUNT}} **source** files re-hashed against the golden manifest after the run, aborted or not. The count is pinned to this report's figure and the manifest the guest verified against is pinned to the digest above, so "12 of 12, clean" cannot present itself as eighteen thousand. |
+| **P5** | The installer's `COMPLETE` marker tells the truth: absent after an abort, and present *and corroborated by P8* after a run that claims success. *The marker is written by the thing under test. It is checked against the measurement, never instead of it.* |
+| **P6** | **Both** immutable base images are unchanged, by hash and by file mode, after the run. |
 | **P7** | The corpus tested is the one this report names. |
+| **P8** | The archive the installer materialised on the destination matches the golden manifest by count and per-file hash, re-read from raw bytes by the harness. *Spec §4.1 requires the data to exist in two places with the second copy verified. P4 measures place one; this measures place two, and it takes nothing from the installer. On an aborted run the archive is legitimately partial, so what P8 requires there is that it was measured at all.* |
+| **P9** | The guest finished the run on its own. *A run the harness had to kill on its timeout is not an abort — it is an installer that never reached one.* |
 
-There is no `skip` status. A check that did not run is a check that failed.
+There is no `skip` status. A check that did not run is a check that failed, and `runner report`
+additionally fails any run whose result does not **contain** every postcondition its kind owes.
+
+Every run the suite owed is in the tables below. A run that produced no result file appears as
+`MISSING` and counts against the denominator; the denominators are the shape the suite owed (100 clean,
+20 induced), never a count of the files that happened to be written.
 
 ## Clean runs — {{CLEAN_PASS}} of {{CLEAN_TOTAL}}
 
-| Run | Verified / expected | Corrupt | Duration | Result digest | Verdict |
-|---|---|---|---|---|---|
+| Run | Source verified | Archive verified | Corrupt | Duration | Result digest | Verdict |
+|---|---|---|---|---|---|---|
 {{CLEAN_RUN_ROWS}}
 
-`Result digest` is the first 16 hex characters of the SHA-256 of that run's `result.json`. The full file,
+`Result digest` is the first 16 hex characters of the SHA-256 of that run's `result.json` **as written
+to disk** — `sha256sum` that file and the first 16 characters are this column. The full file,
 its serial log, its control log and its screenshots live under `artifacts/{{SUITE_ID}}/<run>/`, each with
 its own recorded hash. A row here is a pointer to a file anyone can reopen, not a summary of one.
 
 ## Induced-failure runs — {{FAULT_PASS}} of {{FAULT_TOTAL}}
 
-| Run | Scenario | Pin | Overshoot (bytes) | Boot check | Verified / expected | Result digest | Verdict |
-|---|---|---|---|---|---|---|---|
+| Run | Scenario | Pin | Overshoot (bytes) | Boot check | Source verified | Archive verified | Result digest | Verdict |
+|---|---|---|---|---|---|---|---|---|
 {{FAULT_RUN_ROWS}}
 
 **Pin** is the exact file index and byte offset the fault was scheduled to fire at, computed from the
 golden manifest by integer arithmetic before the VM started. **Overshoot** is how far past it the fault
-actually fired — bounded by the installer's progress-reporting granularity. It is published per run so a
-reader can judge whether the pin was real or nominal, rather than taking it on trust.
+actually fired. It is published per run so a reader can judge whether the pin was real or nominal — and
+it is also *bounded*: a fire further past its pin than `max_overshoot_bytes` fails P0, because a fault
+pinned at 43% that actually fired at 99.9% is a different test wearing this one's name.
+
+Guest-site scenarios additionally record how many bytes were on the destination at the instant the
+trigger fired, measured by walking the archive tree rather than by reading the installer's log. Host-site
+scenarios do not: the walk would take hundreds of milliseconds and spending them between the pin and a
+power cut would move the cut. Those runs are covered instead by P8.
 
 ### The scenarios
 

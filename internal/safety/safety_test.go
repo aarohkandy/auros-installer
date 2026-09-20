@@ -29,6 +29,9 @@ const (
 type fixture struct {
 	sysDir    string
 	destDir   string
+	sysVol    winenv.Volume
+	res       *Resolver
+	dest      Destination
 	sysBefore testsupport.Fingerprint
 	man       *manifest.Manifest
 	q         *quarantine.Set
@@ -41,6 +44,12 @@ type fixture struct {
 func newFixture(t *testing.T, files map[string]string) *fixture {
 	t.Helper()
 	base := t.TempDir()
+	if real, err := filepath.EvalSymlinks(base); err == nil {
+		// The resolver carries RESOLVED paths, so the stand-in volume mounts have
+		// to be resolved too or the fixture is testing a mismatch of its own
+		// making (macOS puts TempDir under a symlinked /var).
+		base = real
+	}
 	sys := filepath.Join(base, "systemdisk")
 	dest := filepath.Join(base, "usb")
 	if err := os.MkdirAll(sys, 0o755); err != nil {
@@ -86,6 +95,13 @@ func newFixture(t *testing.T, files map[string]string) *fixture {
 	f := &fixture{}
 	f.sysDir = sys
 	f.destDir = dest
+	f.sysVol = vol(sysGUID, sys, 100<<30, true)
+	f.res = NewResolver(syntheticEnvFor(sys, dest), f.sysVol)
+	d, derr := f.res.Resolve(dest, 0)
+	if derr != nil {
+		t.Fatalf("resolving the fixture destination: %v", derr)
+	}
+	f.dest = d
 	f.sysBefore = testsupport.Snapshot(t, sys)
 	f.man = man
 	f.q = quarantine.NewSet(clock)
@@ -96,13 +112,46 @@ func newFixture(t *testing.T, files map[string]string) *fixture {
 
 func (f *fixture) req() VerifyRequest {
 	return VerifyRequest{
-		DestRoot:         f.destDir,
-		DestVolumeGUID:   destGUID,
-		SystemVolumeGUID: sysGUID,
-		Manifest:         f.man,
-		Quarantine:       f.q,
-		Log:              f.log,
+		Dest:       f.dest,
+		System:     f.sysVol,
+		Manifest:   f.man,
+		Quarantine: f.q,
+		Log:        f.log,
 	}
+}
+
+// syntheticEnvFor is a machine with exactly two volumes: the stand-in system
+// disk and the stand-in backup drive, each mounted at a real directory, so the
+// resolver does real path resolution against them.
+func syntheticEnvFor(sys, dest string) winenv.Env {
+	cfg := winenv.SyntheticConfig{}
+	cfg.Vols = []winenv.Volume{
+		vol(sysGUID, sys, 100<<30, true),
+		vol(destGUID, dest, 100<<30, false),
+	}
+	cfg.FW = winenv.Firmware{Known: true, BitLockerOnSystemVolume: winenv.Yes, TPMVersion: "1.2"}
+	return winenv.NewSynthetic(cfg)
+}
+
+// withVolume returns the fixture's destination re-labelled with a different
+// volume identity. It is in-package surgery for the tests that need a
+// destination whose identity is wrong; no code outside this package can do it,
+// which is the property being relied on.
+func (f *fixture) destWithVolume(v winenv.Volume) Destination {
+	d := f.dest
+	d.vol = v
+	return d
+}
+
+// armed is the standard ArmRequest for these tests: firmware facts established,
+// BitLocker on. The volume and mount come from the VerifiedArchive, not from
+// here, which is why there are no volume fields to set.
+func armReq(log *runlog.Logger) ArmRequest {
+	r := ArmRequest{}
+	r.BitLocker = winenv.Yes
+	r.FirmwareKnown = true
+	r.Log = log
+	return r
 }
 
 // run drives a machine from the start of the run to the end of phase 4, which is
@@ -272,8 +321,21 @@ func TestVerify_RefusesEmptyManifest(t *testing.T) {
 
 func TestVerify_RefusesWhenArchiveIsOnTheSystemVolume(t *testing.T) {
 	f := newFixture(t, sampleFiles())
+	// The "second copy" is on the disk we would wipe: a directory that really
+	// lives on the system volume, so re-resolving it confirms the bad news
+	// rather than contradicting it.
+	onSys := filepath.Join(f.sysDir, "pretend-usb")
+	if err := os.MkdirAll(onSys, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture, not the code under test, put that directory there; re-baseline
+	// so the assertion at the end still means "Verify changed nothing".
+	f.sysBefore = testsupport.Snapshot(t, f.sysDir)
 	req := f.req()
-	req.DestVolumeGUID = sysGUID // the "second copy" is on the disk we would wipe
+	d := f.dest
+	d.dir = onSys
+	d.vol = f.sysVol
+	req.Dest = d
 	m := atVerifyBoundary(t, ModeCommit, f.log)
 
 	va, _, err := Verify(context.Background(), m, req)
@@ -287,7 +349,8 @@ func TestVerify_RefusesWhenArchiveIsOnTheSystemVolume(t *testing.T) {
 func TestVerify_RefusesWhenVolumeIdentityIsUnknown(t *testing.T) {
 	f := newFixture(t, sampleFiles())
 	req := f.req()
-	req.DestVolumeGUID = "" // a drive letter is not an identity
+	// A drive letter is not an identity.
+	req.Dest = f.destWithVolume(winenv.Volume{Mount: f.destDir, FreeBytes: 100 << 30})
 	m := atVerifyBoundary(t, ModeCommit, f.log)
 
 	va, _, err := Verify(context.Background(), m, req)
@@ -326,7 +389,7 @@ func TestArm_RefusesTheZeroValueVerifiedArchive(t *testing.T) {
 	if forged.IsVerified() {
 		t.Fatal("the zero value claims to be verified")
 	}
-	_, err := Arm(context.Background(), m, forged, ArmRequest{SystemVolumeGUID: sysGUID, Log: f.log})
+	_, err := Arm(context.Background(), m, forged, armReq(f.log))
 	if !errors.Is(err, ErrNotVerified) {
 		t.Fatalf("err = %v, want ErrNotVerified", err)
 	}
@@ -350,7 +413,7 @@ func TestArm_RefusesAnArchiveFromAnotherRun(t *testing.T) {
 	if _, _, err := Verify(context.Background(), m, f2.req()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Arm(context.Background(), m, va, ArmRequest{SystemVolumeGUID: sysGUID, Log: f2.log}); !errors.Is(err, ErrWrongRun) {
+	if _, err := Arm(context.Background(), m, va, armReq(f2.log)); !errors.Is(err, ErrWrongRun) {
 		t.Fatalf("err = %v, want ErrWrongRun", err)
 	}
 	if m.Crossed() {
@@ -371,13 +434,9 @@ func TestArm_DryRunIsTheDefaultAndDoesNotCross(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := Arm(context.Background(), m, va, ArmRequest{
-		SystemVolumeGUID:   sysGUID,
-		SystemMount:        "C:",
-		BitLockerProtected: true,
-		Restart:            true,
-		Log:                f.log,
-	})
+	ar := armReq(f.log)
+	ar.Restart = true
+	res, err := Arm(context.Background(), m, va, ar)
 	if err != nil {
 		t.Fatalf("dry-run Arm: %v", err)
 	}
@@ -416,12 +475,7 @@ func TestArm_CommitModeIsStillCompiledOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = Arm(context.Background(), m, va, ArmRequest{
-		SystemVolumeGUID:   sysGUID,
-		SystemMount:        "C:",
-		BitLockerProtected: true,
-		Log:                f.log,
-	})
+	_, err = Arm(context.Background(), m, va, armReq(f.log))
 	if err == nil {
 		t.Fatal("commit-mode Arm succeeded: the privileged steps are NOT compiled out")
 	}
@@ -524,7 +578,7 @@ func assertCannotArm(t *testing.T, m *Machine, va VerifiedArchive, f *fixture) {
 	if va.IsVerified() {
 		t.Fatal("a VerifiedArchive was issued on a refusal path")
 	}
-	if _, err := Arm(context.Background(), m, va, ArmRequest{SystemVolumeGUID: sysGUID, Log: f.log}); !errors.Is(err, ErrNotVerified) {
+	if _, err := Arm(context.Background(), m, va, armReq(f.log)); !errors.Is(err, ErrNotVerified) {
 		t.Fatalf("Arm with the refused archive: err = %v, want ErrNotVerified", err)
 	}
 	if m.Crossed() {
@@ -543,9 +597,8 @@ func vol(guid, mount string, free uint64, isSystem bool) winenv.Volume {
 
 func TestDestination_RefusesTheSystemDisk(t *testing.T) {
 	sys := vol(sysGUID, `C:\`, 100<<30, true)
-	d := Destination{Volume: vol(sysGUID, `D:\`, 100<<30, false), Dir: `D:\auros`}
 	// Same GUID, different letter: a mount point or a subst'd letter aliasing C:.
-	if err := CheckDestination(d, sys, 1<<20); !errors.Is(err, ErrDestinationIsSystemVolume) {
+	if err := CheckDestination(vol(sysGUID, `D:\`, 100<<30, false), `D:\auros`, sys, 1<<20); !errors.Is(err, ErrDestinationIsSystemVolume) {
 		t.Fatalf("err = %v, want ErrDestinationIsSystemVolume", err)
 	}
 }
@@ -553,59 +606,77 @@ func TestDestination_RefusesTheSystemDisk(t *testing.T) {
 func TestDestination_RefusesWhenTooSmall(t *testing.T) {
 	sys := vol(sysGUID, `C:\`, 100<<30, true)
 	// 10 GB of data needs 11 GB plus metadata; offer 10.5 GB.
-	d := Destination{Volume: vol(destGUID, `E:\`, 10<<30+512<<20, false)}
-	if err := CheckDestination(d, sys, 10<<30); !errors.Is(err, ErrDestinationTooSmall) {
+	if err := CheckDestination(vol(destGUID, `E:\`, 10<<30+512<<20, false), `E:\auros`, sys, 10<<30); !errors.Is(err, ErrDestinationTooSmall) {
 		t.Fatalf("err = %v, want ErrDestinationTooSmall", err)
 	}
 }
 
 func TestDestination_RefusesWhenIdentityIsUnknown(t *testing.T) {
 	sys := vol(sysGUID, `C:\`, 100<<30, true)
-	d := Destination{Volume: vol("", `E:\`, 100<<30, false)}
-	if err := CheckDestination(d, sys, 1<<20); !errors.Is(err, ErrDestinationUnidentified) {
+	if err := CheckDestination(vol("", `E:\`, 100<<30, false), `E:\auros`, sys, 1<<20); !errors.Is(err, ErrDestinationUnidentified) {
 		t.Fatalf("err = %v, want ErrDestinationUnidentified", err)
 	}
 }
 
-func TestDestination_RefusesWhenNothingQualifies(t *testing.T) {
-	sys := vol(sysGUID, `C:\`, 100<<30, true)
-	candidates := []Destination{
-		{Volume: vol(sysGUID, `C:\`, 100<<30, true)},
-		{Volume: vol(destGUID, `E:\`, 1<<20, false)},
-		{Volume: vol("", `F:\`, 900<<30, false)},
+// chooseFixture builds a machine with a system volume and however many backup
+// volumes the test asks for, each mounted at a real directory.
+func chooseFixture(t *testing.T, vols ...winenv.Volume) (*Resolver, winenv.Volume) {
+	t.Helper()
+	base := t.TempDir()
+	if real, err := filepath.EvalSymlinks(base); err == nil {
+		base = real
 	}
-	_, rejected, err := ChooseDestination(candidates, sys, 10<<30)
+	sysDir := filepath.Join(base, "systemdisk")
+	if err := os.MkdirAll(sysDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sys := vol(sysGUID, sysDir, 100<<30, true)
+	cfg := winenv.SyntheticConfig{Vols: []winenv.Volume{sys}}
+	for i, v := range vols {
+		dir := filepath.Join(base, "drive", string(rune('a'+i)))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		v.Mount = dir
+		cfg.Vols = append(cfg.Vols, v)
+	}
+	return NewResolver(winenv.NewSynthetic(cfg), sys), sys
+}
+
+func TestDestination_RefusesWhenNothingQualifies(t *testing.T) {
+	r, _ := chooseFixture(t,
+		vol(sysGUID, "", 100<<30, false), // the system volume behind another letter
+		vol(destGUID, "", 1<<20, false),  // far too small
+		vol("", "", 900<<30, false),      // no identity
+	)
+	_, rejected, err := r.Choose("auros-backup", 10<<30)
 	if !errors.Is(err, ErrNoDestination) {
 		t.Fatalf("err = %v, want ErrNoDestination", err)
 	}
-	if len(rejected) != 3 {
-		t.Errorf("rejected %d, want 3 (the user is told about every drive)", len(rejected))
+	if len(rejected) != 4 {
+		// three candidate drives plus the system volume itself
+		t.Errorf("rejected %d, want 4 (the user is told about every drive)", len(rejected))
 	}
 	if s := DescribeRejections(rejected); s == "" {
 		t.Error("no explanation was produced for the user")
 	}
 }
 
-func TestDestination_RefusesWithNoCandidatesAtAll(t *testing.T) {
-	sys := vol(sysGUID, `C:\`, 100<<30, true)
-	if _, _, err := ChooseDestination(nil, sys, 1<<20); !errors.Is(err, ErrNoDestination) {
-		t.Fatalf("err = %v, want ErrNoDestination", err)
-	}
-}
-
 func TestDestination_PicksTheLargestQualifyingVolume(t *testing.T) {
-	sys := vol(sysGUID, `C:\`, 100<<30, true)
 	big := `\\?\Volume{33333333-3333-3333-3333-333333333333}\`
-	candidates := []Destination{
-		{Volume: vol(destGUID, `E:\`, 20<<30, false)},
-		{Volume: vol(big, `F:\`, 64<<30, false)},
-	}
-	got, _, err := ChooseDestination(candidates, sys, 1<<30)
+	r, _ := chooseFixture(t,
+		vol(destGUID, "", 20<<30, false),
+		vol(big, "", 64<<30, false),
+	)
+	got, _, err := r.Choose("auros-backup", 1<<30)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Volume.GUID != big {
-		t.Errorf("chose %s, want the larger volume", got.Volume.Mount)
+	if got.Volume().GUID != big {
+		t.Errorf("chose %s, want the larger volume", got.Volume().Mount)
+	}
+	if !got.Resolved() {
+		t.Error("the chosen destination carries no proof")
 	}
 }
 

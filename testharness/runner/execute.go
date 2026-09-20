@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,11 +17,6 @@ import (
 // volumes. It is outside anything the installer can return, so "the harness would not let the run
 // start" can never be read as "the installer aborted", which is a pass for an abort scenario.
 const ExitTokenRefused = 90
-
-func sha256Bytes(b []byte) (string, error) {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), nil
-}
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // THE HARNESS TOKEN — spec §4.7 made structural
@@ -360,12 +353,12 @@ func executeRun(cfg *Config, suiteID, outDir, kind string, ordinal int, scenario
 
 	// ── phase 1: the run itself ───────────────────────────────────────────────────────────────────
 	spec := VMSpec{
-		QemuBinary:    cfg.Qemu.Binary, Accel: cfg.Qemu.Accel,
-		MemoryMB:      cfg.Machine.MemoryMB, CPUs: cfg.Machine.CPUs, Headless: cfg.Machine.Headless,
+		QemuBinary: cfg.Qemu.Binary, Accel: cfg.Qemu.Accel,
+		MemoryMB: cfg.Machine.MemoryMB, CPUs: cfg.Machine.CPUs, Headless: cfg.Machine.Headless,
 		SystemOverlay: sysOverlay, DestOverlay: destOverlay, MarkerImage: markerRun,
-		QMPSock:       filepath.Join(sockDir, "qmp.sock"),
-		ControlSock:   filepath.Join(sockDir, "ctl.sock"),
-		SerialLog:     filepath.Join(dir, "serial.log"),
+		QMPSock:     filepath.Join(sockDir, "qmp.sock"),
+		ControlSock: filepath.Join(sockDir, "ctl.sock"),
+		SerialLog:   filepath.Join(dir, "serial.log"),
 	}
 	vm := &VM{}
 	if err := vm.Start(spec); err != nil {

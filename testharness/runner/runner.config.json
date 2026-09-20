@@ -72,6 +72,9 @@
     "--no-arm"
   ],
 
+  "max_overshoot_bytes": 4194304,
+  "$comment_max_overshoot": "A fault pinned at 43% that actually fires at 99.9% is not that fault. The contracted progress granularity is one line per 1 MiB copied plus one per file boundary (README section 5), so the smallest honest ceiling is 1 MiB; 4 MiB is two doublings of headroom for a slow poll on a loaded host. Postcondition P0 fails a run whose fire overshot this.",
+
   "installer_scope": "SAFETY.md phases 1-5 (INVENTORY, DISCLOSE, DESTINATION, COPY, VERIFY). --no-arm withholds phase 6, so these runs prove the data-integrity half of the migration and deliberately stop at the wall. Phases 6-7 have their own, smaller, end-to-end suite because arming the machine means it next boots the Auros image rather than Windows, which is incompatible with the 'Windows still boots normally' check these 120 runs exist to make. REPORT.md states this on its face; '100 successful migrations' would otherwise be read as covering a phase that was never run.",
 
   "timeouts": {

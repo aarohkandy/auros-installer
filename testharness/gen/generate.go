@@ -182,8 +182,8 @@ type Plan struct {
 	Harness        string   `json:"harness"`
 	Seed           uint64   `json:"seed"`
 	CorpusDigest   string   `json:"corpus_digest"`
-	LockedFiles    []string `json:"locked_files"`     // for `gen hold`
-	ReadOnlyFiles  int      `json:"read_only_files"`  // counts, so the runner can assert the guest agrees
+	LockedFiles    []string `json:"locked_files"`    // for `gen hold`
+	ReadOnlyFiles  int      `json:"read_only_files"` // counts, so the runner can assert the guest agrees
 	PlaceholderCnt int      `json:"placeholder_files"`
 	ADSFiles       int      `json:"ads_files"`
 	LongPathFiles  int      `json:"long_path_files"`
@@ -209,8 +209,8 @@ type Plan struct {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 type bucket struct {
-	name string
-	num  int // share of the corpus, expressed out of 18000
+	name     string
+	num      int // share of the corpus, expressed out of 18000
 	min, max int64
 }
 
@@ -399,7 +399,7 @@ type harnessToken struct {
 	RunID                  string `json:"run_id"`
 	BaseImageSHA           string `json:"base_image_sha256"`
 	TargetVolSerial        string `json:"target_volume_serial"`
-	DestroysEverythingHere bool `json:"destroys_everything_on_target_volume"`
+	DestroysEverythingHere bool   `json:"destroys_everything_on_target_volume"`
 	Note                   string `json:"note"`
 }
 
@@ -551,10 +551,10 @@ func cmdGenerate(args []string) error {
 	}
 
 	meta := Meta{
-		Harness:      HarnessVersion, Seed: *seed, Profile: *profile, Count: len(recs),
-		TotalBytes:   total, CorpusRoot: *root, VolumeSerial: volSerial,
+		Harness: HarnessVersion, Seed: *seed, Profile: *profile, Count: len(recs),
+		TotalBytes: total, CorpusRoot: *root, VolumeSerial: volSerial,
 		CorpusDigest: digest, Faithful: faithful, FaithfulNotes: notes,
-		GeneratedOn:  platGOOS(), CohortCounts: cohorts,
+		GeneratedOn: platGOOS(), CohortCounts: cohorts,
 	}
 	if err := writeJSON(filepath.Join(dest, "golden-manifest.meta.json"), meta); err != nil {
 		return err
@@ -703,7 +703,7 @@ func plan(seed uint64, winRoot string, count int, buckets []bucket) ([]FileRec, 
 			}
 		}
 		recs = append(recs, FileRec{
-			Path:    rel, Size: p.size, Cohort: p.cohort,
+			Path: rel, Size: p.size, Cohort: p.cohort,
 			WinPath: winPath(winRoot, rel), WinPathLen: winLen(winRoot, rel),
 		})
 	}
@@ -1190,11 +1190,11 @@ type VerifyResult struct {
 	// line because the runner reads both from one serial log, and two structurally identical JSON
 	// objects distinguished only by argument order is how a harness ends up verifying the source twice
 	// and calling the second one the destination.
-	Label             string   `json:"label"`
-	Root              string   `json:"root"`
-	ManifestSHA       string   `json:"manifest_sha256"`
-	Expected          int      `json:"expected_files"`
-	Present           int      `json:"present_files"`
+	Label       string `json:"label"`
+	Root        string `json:"root"`
+	ManifestSHA string `json:"manifest_sha256"`
+	Expected    int    `json:"expected_files"`
+	Present     int    `json:"present_files"`
 	// PresentBytes is the summed logical size of the files that were found. On an aborted run the
 	// archive is legitimately partial, so its byte total is the only number that says whether the
 	// installer was copying at all.

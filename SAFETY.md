@@ -41,8 +41,20 @@ permitted to write to the system disk or to firmware variables, and it refuses t
 a `VerifiedArchive` value — a type that cannot be constructed except by a successful phase 5.
 
 That is the enforcement mechanism: not a check at the top of a function, which someone deletes in a year,
-but a value that **cannot exist** unless verification succeeded. `Arm()` takes a `VerifiedArchive`. There
-is no other way to call it.
+but a value that **cannot be constructed by any safe-Go path** unless verification succeeded. `Arm()`
+takes a `VerifiedArchive`. There is no other way to call it.
+
+The wording is exact, because the stronger sentence this file used to carry — "a value that cannot
+exist" — is false, and a guarantee overstated by one word is the one people stop re-checking. Go's
+unexported fields are a compiler rule, not a memory boundary: two pointer writes through `unsafe` forge
+the type. Reflection does not (it sets `flagRO` and panics on `SetBool`), embedding does not,
+`encoding/json` does not. So the guarantee has two halves, and both are mechanical:
+
+- **the type**, which closes every safe path; and
+- **`TestWall_ForbiddenImports` and `TestWall_SyscallIsConstantsOnly`**, which confine `unsafe` to
+  `internal/winenv` and allow `syscall` outside `internal/winenv`/`internal/sysdisk` only for errno and
+  signal constants. Forging the proof, or reaching Win32 from a package the wall does not watch, is a
+  red build rather than something a reviewer has to catch.
 
 ## What each phase must do
 
@@ -73,6 +85,17 @@ Acknowledgement is required and recorded in the run log.
 ### 3 — DESTINATION (writes only to the destination)
 Must not be the system disk. Verified by volume GUID, **not by drive letter** — a mount point or a
 subst'd letter can alias the system volume. Requires free space ≥ (inventory size × 1.1) + manifest.
+
+**The path is resolved before it is trusted, and the volume is derived from the resolved path.**
+`D:\backup` can be an NTFS junction onto `C:\AurosBackup`: the letter says D:, the bytes land on C:. So
+the destination is resolved through every link first, the operating system is asked which volume holds
+the *resolved* directory (`GetVolumePathNameW`, then `GetVolumeNameForVolumeMountPointW`), and the
+resolved path — never the one the user typed — is what the copy engine, the run log and the verifier are
+given. The identity is re-established once more before the first write and again before the proof is
+minted, so a junction swapped in mid-run stops the run instead of redirecting it.
+
+A `Destination` is therefore a proof, not a pair of strings: its fields are unexported and the only
+producer is `safety.Resolver`. No caller can assert one into existence.
 If no qualifying destination exists, we **refuse to continue**. We do not offer a smaller subset, we do
 not offer to skip verification, and we do not offer to use the system disk.
 
@@ -103,6 +126,14 @@ Takes a `VerifiedArchive`. In order:
    On TPM 1.2 — common across 2012–2015 — changing firmware boot order triggers a recovery-key prompt.
    Stranding a user at a recovery prompt **on the abort path** is the worst outcome this tool can produce,
    so this is unconditional, not an option.
+
+   "Unconditional" means the step is planned unless BitLocker is **positively known to be off**. The
+   finding is a tri-state and its zero value is Unknown, which is treated as protected: suspending
+   protectors on a machine that is not using BitLocker is a no-op, and not suspending them on a machine
+   that is costs a school its laptop. Where phase 1 could not tell, `internal/sysdisk` probes
+   `manage-bde -status` — a read — before the plan is built. **And a commit-mode run refuses to arm at
+   all while the firmware facts are not established**, because arming on facts the tool admits it never
+   checked is arming blind.
 2. Set one-time boot, preferring `BootNext`, falling back to `shutdown /r /fw` (send the user to the
    firmware menu with instructions) because `BootNext` is not honoured reliably across vendors.
 3. Restart.
@@ -122,6 +153,14 @@ customer read is the one that matters.
 
 **Every step is individually reversible, and the reversal is tested more than the action.**
 
+**The reversals run on a context the cancellation cannot reach.** If the user presses Ctrl-C between
+step 1 and step 2, the run's context is already dead, and reversals built from it refuse to start a
+process — leaving BitLocker suspended and the boot order changed, which is the half-armed machine the
+unwind exists to prevent, produced by the abort path itself. So the unwind derives its context with
+`context.WithoutCancel` and its own deadline, and a panic inside a step unwinds before it propagates.
+The step loop and the unwind live in an untagged file so that the abort path is testable on every
+platform; only the part that starts a process is behind `auros_arm_enabled`.
+
 ### 7 — RESTORE (Linux side, first boot)
 Restore from the archive, **re-verify count and hash a third time**, and report the count on the desktop
 where the user can see it. A discrepancy is shown, never swallowed.
@@ -139,6 +178,13 @@ where the user can see it. A discrepancy is shown, never swallowed.
    a machine that will not boot.
 6. **Dry-run is the default.** `--commit` is required to cross the wall, and the UI says which mode it is
    in at all times.
+7. **No claim about the system disk is a literal.** "Nothing was written to the system disk" is printed
+   only where it has been measured — the resolved destination's volume GUID compared against the system
+   volume's, at the moment of logging. A sentence that is printed whether or not it is true is worse than
+   no sentence, and three of them were.
+8. **No refusal has an exported off switch.** `VerifyRequest.AllowEmpty` was one: an exported bool that
+   disabled the empty-archive refusal whose own doc comment names that as the failure it catches. Options
+   that weaken a check are unexported and in-package, the way `copyengine`'s test hooks are.
 
 ## What "one restart" actually means, and what we may say
 

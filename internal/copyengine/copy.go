@@ -74,6 +74,21 @@ type Options struct {
 	// Resume reuses a manifest left by an earlier interrupted run.
 	Resume bool
 
+	// ResumeIdentity is the identity this destination must carry for a resume to
+	// be allowed: in practice the destination volume's GUID. A manifest found on
+	// the drive is not evidence about THIS machine's files — anyone can write one,
+	// and a stick that travelled between two laptops carries the other one's.
+	// The sidecar written next to the manifest records this value, and a resume
+	// whose sidecar does not match is refused rather than trusted.
+	ResumeIdentity string
+
+	// AssertDestination is called after the destination's metadata directory is
+	// created and BEFORE the first byte is written. It re-establishes that the
+	// destination is still the volume phase 3 identified, closing the window in
+	// which a junction could be swapped in after the check and before the copy.
+	// An error stops the run with nothing written.
+	AssertDestination func() error
+
 	// Progress may be nil.
 	Progress func(Progress)
 
@@ -131,6 +146,10 @@ type Result struct {
 	Cancelled       bool
 	PartialsSwept   []string
 	ManifestPath    string
+	// DestRoot is the only directory this run wrote to.
+	DestRoot string
+	// ResumeRefused says why a requested resume was not used.
+	ResumeRefused string
 }
 
 // Describe renders the result for a human, always saying what did NOT happen.
@@ -145,7 +164,12 @@ func (r *Result) Describe() string {
 	if r.Cancelled {
 		b.WriteString("      CANCELLED. Partial files were removed; the manifest lists what is complete.\n")
 	}
-	b.WriteString("      nothing was written to the system disk.\n")
+	// Every write this package makes goes under DestRoot. Whether DestRoot is on
+	// the system disk is not a fact this package can establish, so it states
+	// WHERE it wrote and leaves the claim about which disk that is to the code
+	// that measured it. A sentence printed whether or not it is true is worse
+	// than no sentence.
+	fmt.Fprintf(&b, "      every byte was written under %s, and nowhere else.\n", r.DestRoot)
 	return b.String()
 }
 
@@ -175,9 +199,19 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	if o.DestRoot == "" {
 		return res, ErrNoDestination
 	}
+	res.DestRoot = o.DestRoot
 	metaPath := filepath.Join(o.DestRoot, o.metaDir())
 	if err := os.MkdirAll(metaPath, 0o755); err != nil {
 		return res, fmt.Errorf("copyengine: preparing destination: %w", err)
+	}
+	// The destination was identified in phase 3. Between then and now a link
+	// could have been swapped in underneath it, so the identity is re-established
+	// here, after the first directory is created and before the first file is
+	// written. A failure stops the run with nothing copied.
+	if o.AssertDestination != nil {
+		if err := o.AssertDestination(); err != nil {
+			return res, fmt.Errorf("copyengine: destination identity: %w", err)
+		}
 	}
 	res.ManifestPath = filepath.Join(metaPath, manifest.FileName)
 
@@ -193,8 +227,20 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 
 	prior := map[string]manifest.Entry{}
 	if o.Resume {
-		prior = loadPrior(res.ManifestPath)
-		logEvent(o.Log, "resume", runlog.Fields{"prior_entries": len(prior)})
+		var why string
+		prior, why = loadPrior(metaPath, res.ManifestPath, o.ResumeIdentity)
+		res.ResumeRefused = why
+		logEvent(o.Log, "resume", runlog.Fields{
+			"prior_entries": len(prior),
+			"refused":       why,
+			"identity":      o.ResumeIdentity,
+		})
+	}
+	// Whatever happens below, this destination is now bound to this run's
+	// identity, so a later --resume can tell "my own interrupted run" from
+	// "a manifest that was already on the stick".
+	if err := writeResumeToken(metaPath, o.ResumeIdentity); err != nil {
+		logEvent(o.Log, "warn", runlog.Fields{"stage": "resume-token", "error": err.Error()})
 	}
 
 	files, err := plan(ctx, o, q)
@@ -216,6 +262,7 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 	buf := make([]byte, o.bufSize())
 	h := sha256.New()
 
+copyLoop:
 	for i, f := range files {
 		if err := ctx.Err(); err != nil {
 			res.Cancelled = true
@@ -227,18 +274,46 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 			break
 		}
 
-		// Resume: an entry from a previous run whose destination file is still
-		// there at the right size is carried forward. It is not trusted — phase
-		// 5 re-reads and re-hashes every single file from the destination
-		// regardless of how it got there. This only avoids re-writing bytes.
+		// Resume: an entry from a previous run is carried forward only after the
+		// SOURCE has been re-read and re-hashed and agrees with it.
+		//
+		// The old version checked size and mtime and trusted the recorded digest.
+		// That digest describes whatever file is at the destination, and phase 5
+		// compares the destination against it, so the whole chain could close
+		// around bytes that are not the user's current files — a planted
+		// manifest, a stick carrying another machine's run, or a source rewritten
+		// in place with its size and nanosecond mtime preserved. Verify never
+		// reads the source by design, so nothing downstream could catch it.
+		//
+		// Re-reading the source costs a read and saves the write, which is the
+		// expensive half on a USB stick. What it buys is that a resumed entry
+		// means the same thing as a copied one.
 		if e, ok := prior[f.Rel]; ok && e.Stored == f.Stored && e.Size == f.Size && e.ModTimeUnixNano == f.ModTime {
 			if st, serr := os.Lstat(filepath.Join(o.DestRoot, filepath.FromSlash(e.Stored))); serr == nil &&
 				st.Mode().IsRegular() && st.Size() == e.Size {
-				if aerr := res.Manifest.Add(e); aerr == nil {
-					res.Resumed++
-					q.Clear(f.Rel)
-					report(o, res, q, f.Rel)
-					continue
+				h.Reset()
+				sum, n, herr := manifest.HashFile(ctx, f.Src, h, buf)
+				switch {
+				case errors.Is(herr, context.Canceled), errors.Is(herr, context.DeadlineExceeded):
+					res.Cancelled = true
+					quarantineRemaining(q, files[i:], quarantine.ReasonCancelled, "the run was cancelled while this file was being re-read for resume")
+					break copyLoop
+				case herr == nil && n == e.Size && sum == e.SHA256:
+					if aerr := res.Manifest.Add(e); aerr == nil {
+						res.Resumed++
+						q.Clear(f.Rel)
+						logEvent(o.Log, "resumed", runlog.Fields{
+							"path": f.Rel,
+							"note": "not re-copied; the source was re-read and matches the recorded digest",
+						})
+						report(o, res, q, f.Rel)
+						continue
+					}
+				default:
+					logEvent(o.Log, "resume-mismatch", runlog.Fields{
+						"path": f.Rel,
+						"note": "the source no longer matches the recorded digest; copying it again",
+					})
 				}
 			}
 		}
@@ -292,14 +367,15 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		logEvent(o.Log, "warn", runlog.Fields{"stage": "quarantine-report", "error": werr.Error()})
 	}
 	logEvent(o.Log, "complete", runlog.Fields{
-		"bytes":                 res.BytesCopied,
-		"cancelled":             res.Cancelled,
-		"copied":                res.Copied,
-		"destination_full":      res.DestinationFull,
-		"manifest_digest":       res.Manifest.Digest(),
-		"quarantined":           res.Quarantined,
-		"resumed":               res.Resumed,
-		"system_disk_untouched": true,
+		"bytes":            res.BytesCopied,
+		"cancelled":        res.Cancelled,
+		"copied":           res.Copied,
+		"destination_full": res.DestinationFull,
+		"manifest_digest":  res.Manifest.Digest(),
+		"quarantined":      res.Quarantined,
+		"resumed":          res.Resumed,
+		"dest_root":        res.DestRoot,
+		"writes_confined":  "every write went under dest_root; which volume that is was established in phase 3 and re-checked before the first write",
 	})
 
 	switch {
@@ -513,24 +589,53 @@ func sweepPartials(ctx context.Context, destRoot string) ([]string, error) {
 	return removed, err
 }
 
-// loadPrior reads a manifest left by an earlier run. A corrupt or truncated one
-// is simply not used: resuming from a manifest we cannot parse would mean
-// trusting entries we cannot read.
-func loadPrior(path string) map[string]manifest.Entry {
+// resumeTokenName is the sidecar binding a destination to the run that wrote it.
+// It is NOT inside the manifest: the manifest's whole value is that it carries no
+// ambient state, so that two runs over the same tree serialise identically. The
+// binding lives beside it instead.
+const resumeTokenName = "resume-identity"
+
+// writeResumeToken records which destination volume this run is writing to.
+func writeResumeToken(metaDir, identity string) error {
+	if identity == "" {
+		return nil
+	}
+	return os.WriteFile(filepath.Join(metaDir, resumeTokenName), []byte(identity+"\n"), 0o644)
+}
+
+// loadPrior reads a manifest left by an earlier run, and returns nothing at all
+// unless that manifest demonstrably belongs to THIS destination.
+//
+// A corrupt or truncated manifest is not used: resuming from one we cannot parse
+// would mean trusting entries we cannot read. A manifest whose sidecar identity
+// does not match this destination is not used either, and that is the more
+// interesting case — the trailer is a plain SHA-256 of the manifest's own body,
+// so it is self-consistent rather than authenticated, and anyone can write one.
+func loadPrior(metaDir, path, identity string) (map[string]manifest.Entry, string) {
 	out := map[string]manifest.Entry{}
+	if identity == "" {
+		return out, "the destination has no identity to bind a resume to"
+	}
+	tok, terr := os.ReadFile(filepath.Join(metaDir, resumeTokenName))
+	if terr != nil {
+		return out, "this destination carries no record of an interrupted Auros run"
+	}
+	if strings.TrimSpace(string(tok)) != identity {
+		return out, "the files already here were written for a different destination volume"
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return out
+		return out, "no manifest to resume from"
 	}
 	defer f.Close()
 	m, err := manifest.Read(f)
 	if err != nil {
-		return out
+		return out, "the manifest here could not be parsed: " + err.Error()
 	}
 	for _, e := range m.Entries() {
 		out[e.Path] = e
 	}
-	return out
+	return out, ""
 }
 
 // saveManifest writes the manifest unless doing so would destroy a better one.

@@ -27,6 +27,13 @@ import (
 // ErrSystemVolume is returned by Open when the destination is the system volume.
 var ErrSystemVolume = errors.New("runlog: refusing to write the run log to the system volume")
 
+// ErrDestRootIsLink is returned when the directory the log would go in is
+// reached through a link. This package cannot identify volumes — that is phase
+// 3's job and the caller passes the answer in — but it can refuse to write
+// through a door it cannot see behind, which is the mechanism by which a run log
+// ends up on the disk the run is about to change.
+var ErrDestRootIsLink = errors.New("runlog: the log directory is reached through a link; refusing to write the run log through it")
+
 // Logger is concurrency-safe.
 type Logger struct {
 	mu   sync.Mutex
@@ -76,6 +83,13 @@ func Open(opts Options) (*Logger, error) {
 	dir := filepath.Join(opts.DestRoot, meta)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("runlog: %w", err)
+	}
+	real, rerr := filepath.EvalSymlinks(dir)
+	if rerr != nil {
+		return nil, fmt.Errorf("runlog: resolving %s: %w", dir, rerr)
+	}
+	if filepath.Clean(real) != filepath.Clean(dir) {
+		return nil, fmt.Errorf("%w: %s -> %s", ErrDestRootIsLink, dir, real)
 	}
 	p := filepath.Join(dir, "run-"+stamp+".jsonl")
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)

@@ -24,25 +24,25 @@ import (
 
 func main() {
 	var (
-		tokenPath   = flag.String("token", "", "harness token on the AUROS-HARNESS marker volume")
-		corpusRoot  = flag.String("corpus-root", "", `the corpus root, e.g. C:\Users\student`)
-		destVolume  = flag.String("dest-volume", "", `destination volume root, e.g. E:\`)
-		destData    = flag.String("dest-data-root", "", `archive data root, e.g. E:\auros-archive\data`)
-		goldenMan   = flag.String("golden-manifest", "", "golden-manifest.jsonl on the marker volume")
-		expectDig   = flag.String("expect-corpus-digest", "", "refuse if the golden manifest does not hash to this")
-		progress    = flag.String("progress", "", "the installer's auros-progress.ndjson on the destination")
+		tokenPath    = flag.String("token", "", "harness token on the AUROS-HARNESS marker volume")
+		corpusRoot   = flag.String("corpus-root", "", `the corpus root, e.g. C:\Users\student`)
+		destVolume   = flag.String("dest-volume", "", `destination volume root, e.g. E:\`)
+		destData     = flag.String("dest-data-root", "", `archive data root, e.g. E:\auros-archive\data`)
+		goldenMan    = flag.String("golden-manifest", "", "golden-manifest.jsonl on the marker volume")
+		expectDig    = flag.String("expect-corpus-digest", "", "refuse if the golden manifest does not hash to this")
+		progress     = flag.String("progress", "", "the installer's auros-progress.ndjson on the destination")
 		instManifest = flag.String("installer-manifest", "", "the installer's own manifest on the destination")
-		scenarioID  = flag.String("scenario", "", "F01..F20, or empty for a clean run")
-		control     = flag.String("control", `\\.\COM2`, "serial line to the runner")
-		checkOnly   = flag.Bool("check-token-only", false,
+		scenarioID   = flag.String("scenario", "", "F01..F20, or empty for a clean run")
+		control      = flag.String("control", `\\.\COM2`, "serial line to the runner")
+		checkOnly    = flag.Bool("check-token-only", false,
 			"perform the §4.7 volume-serial check and exit. This is the mode CLEAN runs use: they induce "+
 				"nothing, so they have no fault agent to run, and without this they would be the 100 runs "+
 				"of 120 in which the guard was never exercised.")
 		maxOvershoot = flag.Int64("max-overshoot-bytes", fault.DefaultMaxOvershootBytes,
 			"a fire further past its pin than this is not a fire at that pin")
-		out         = flag.String("out", "", "also write the FireRecord JSON here")
-		timeoutSec  = flag.Int("timeout-sec", 5400, "give up waiting for the trigger after this long")
-		pollMS      = flag.Int("poll-ms", 5, "progress poll interval")
+		out        = flag.String("out", "", "also write the FireRecord JSON here")
+		timeoutSec = flag.Int("timeout-sec", 5400, "give up waiting for the trigger after this long")
+		pollMS     = flag.Int("poll-ms", 5, "progress poll interval")
 	)
 	flag.Parse()
 

@@ -185,14 +185,20 @@ func (m *Machine) CrossWall(v VerifiedArchive) error {
 	if m.aborted {
 		return fmt.Errorf("%w (%s)", ErrAborted, m.reason)
 	}
+	// The token is checked before any other live state, for the reason Arm
+	// states: the most important refusal must not depend on anything else being
+	// right. An unverified archive presented from the wrong phase used to be
+	// reported as ErrOutOfOrder, which named the sequencing mistake and hid the
+	// one that matters. Both were refusals, so nothing crossed that should not
+	// have; what was wrong was the sentence the caller and the run log got.
+	if !v.ok() {
+		return ErrNotVerified
+	}
 	if m.crossed {
 		return ErrAlreadyArmed
 	}
 	if m.cur != PhaseVerify {
 		return fmt.Errorf("%w: the wall is crossed from %s, not from %s", ErrOutOfOrder, PhaseVerify, m.cur)
-	}
-	if !v.ok() {
-		return ErrNotVerified
 	}
 	if v.runID != m.runID {
 		return fmt.Errorf("%w: archive %s, run %s", ErrWrongRun, v.runID, m.runID)
@@ -236,11 +242,12 @@ func (m *Machine) DryRunWall(v VerifiedArchive) error {
 	if m.aborted {
 		return fmt.Errorf("%w (%s)", ErrAborted, m.reason)
 	}
-	if m.cur != PhaseVerify {
-		return fmt.Errorf("%w: the wall is reached from %s, not from %s", ErrOutOfOrder, PhaseVerify, m.cur)
-	}
+	// Token first, for the same reason as CrossWall above.
 	if !v.ok() {
 		return ErrNotVerified
+	}
+	if m.cur != PhaseVerify {
+		return fmt.Errorf("%w: the wall is reached from %s, not from %s", ErrOutOfOrder, PhaseVerify, m.cur)
 	}
 	if v.runID != m.runID {
 		return fmt.Errorf("%w: archive %s, run %s", ErrWrongRun, v.runID, m.runID)

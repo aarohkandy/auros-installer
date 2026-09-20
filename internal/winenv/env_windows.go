@@ -105,19 +105,25 @@ func (w *winEnv) KnownFolders() ([]Folder, error) {
 	out := make([]Folder, 0, len(knownFolderIDs))
 	for _, kf := range knownFolderIDs {
 		id := kf.ID
-		var ptr uintptr
+		// The out-parameter is typed *uint16 rather than uintptr so that the
+		// CoTaskMem buffer never has to be converted back from an integer.
+		// uintptr -> unsafe.Pointer is the one direction that is genuinely
+		// unsound (the value is not a reference while it sits in an integer)
+		// and `go vet` fails the build on it; this is the same shape
+		// x/sys/windows uses for SHGetKnownFolderPath.
+		var ptr *uint16
 		r, _, _ := procSHGetKnownFolderPath.Call(
 			uintptr(unsafe.Pointer(&id)),
 			0, // no flags: do not create, do not verify
 			0, // current user token
 			uintptr(unsafe.Pointer(&ptr)),
 		)
-		if r != 0 || ptr == 0 {
+		if r != 0 || ptr == nil {
 			out = append(out, Folder{ID: kf.Name, Present: false})
 			continue
 		}
-		p := utf16PtrToString((*uint16)(unsafe.Pointer(ptr)))
-		procCoTaskMemFree.Call(ptr)
+		p := utf16PtrToString(ptr)
+		procCoTaskMemFree.Call(uintptr(unsafe.Pointer(ptr)))
 		st, err := os.Stat(p)
 		out = append(out, Folder{ID: kf.Name, Path: p, Present: err == nil && st.IsDir()})
 	}
@@ -322,6 +328,11 @@ func (w *winEnv) Firmware() (Firmware, error) {
 	// and every one of them is a fact we tell the user BEFORE they start. A
 	// guess here becomes a promise the tool cannot keep, so this returns
 	// Known=false until the detection is written and validated in a VM.
+	//
+	// Known=false is not a shrug any more: safety.Arm REFUSES to commit while it
+	// is false, and the BitLocker fact in particular is probed separately by
+	// internal/sysdisk (manage-bde -status), because asking that question means
+	// running a command and this package is not allowed to.
 	return Firmware{
 		Known: false,
 		Notes: []string{
