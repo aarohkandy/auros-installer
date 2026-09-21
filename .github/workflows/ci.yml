@@ -273,7 +273,7 @@ jobs:
         run: |
           out="$(dist/auros-restore-linux-amd64 --archive /nonexistent --require-archive 2>&1 || true)"
           echo "$out"
-          echo "$out" | grep -q "no archive" || {
+          echo "$out" | grep -q "does not hold a backup" || {
             echo "the refusal does not say what is wrong"; exit 1; }
           dist/auros-restore-linux-amd64 --archive /nonexistent --require-archive && {
             echo "--require-archive returned 0 with no archive"; exit 1; } || true
