@@ -117,7 +117,7 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 		// able to write to; C: never is.
 		lowDirs = otherFixedVolumes(lowDirs)
 	}
-	low, enf := ApplyEnforcement(sess, cfg.WorkDir, lowDirs)
+	low, enf := ApplyEnforcement(sess, cfg.WorkDir, cfg.CorpusRoot, lowDirs)
 	res.Enforcement = enf
 	if low != nil {
 		defer syscall.CloseHandle(low.Token)
