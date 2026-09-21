@@ -331,7 +331,7 @@ func cmdProveRed(args []string) error {
 		return err
 	}
 	time.Sleep(2 * time.Second)
-	quietRep, err := gate3.DiffUSN(quiet, nil)
+	quietRep, err := gate3.DiffUSN(quiet, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -346,6 +346,14 @@ func cmdProveRed(args []string) error {
 	//    is written where a migration tool would plausibly put scratch state,
 	//    and it is deleted again immediately — a name-and-size snapshot would
 	//    not have seen it at all.
+	//    The ETW trace runs across it with THIS process as the installer's
+	//    root: attribution must name the probe's writer and must not excuse it.
+	fmt.Print(gate3.ProviderKeywords())
+	trace, err := gate3.StartTrace(filepath.Join(os.TempDir(), "gate3-prove-red-etw"))
+	if err != nil {
+		return err
+	}
+	defer trace.Stop()
 	mark, err := gate3.MarkUSN("C:")
 	if err != nil {
 		return err
@@ -358,16 +366,29 @@ func cmdProveRed(args []string) error {
 		return err
 	}
 	time.Sleep(2 * time.Second)
-	rep, err := gate3.DiffUSN(mark, nil)
+	attr := trace.Attribute([]uint32{uint32(os.Getpid())})
+	fmt.Printf("trace events: %v\n", attr.Events)
+	rep, err := gate3.DiffUSN(mark, nil, attr)
 	if err != nil {
 		return err
 	}
-	found := false
+	fmt.Printf("attribution: %s\n", rep.Attribution)
+	for _, u := range rep.Background {
+		fmt.Printf("   ~ %s\n", u)
+	}
+	if !strings.HasPrefix(rep.Attribution, "on:") {
+		return fmt.Errorf("attribution did not come on, so every clean run would fail closed: %s", rep.Attribution)
+	}
+	found, attributed := false, false
 	for _, u := range rep.Unexplained {
 		if strings.Contains(strings.ToLower(u), "auros-gate3-prove-red.tmp") {
 			found = true
+			attributed = attributed || strings.Contains(u, "installer's process tree")
 			fmt.Printf("the system-disk check reported it: %s\n", u)
 		}
+	}
+	if found && !attributed {
+		return fmt.Errorf("the probe was reported but not attributed to the process that wrote it")
 	}
 	if !found {
 		return fmt.Errorf("THE SYSTEM-DISK CHECK DID NOT NOTICE a file created and deleted on C: "+

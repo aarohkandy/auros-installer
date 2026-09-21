@@ -166,6 +166,11 @@ type SystemDiskReport struct {
 	Records     int      `json:"records_examined"`
 	Excluded    int      `json:"records_excluded_as_noise"`
 	Unexplained []string `json:"unexplained_changes,omitempty"`
+	// Attribution says whether the ETW trace was used, and if not, why not.
+	// Background lists changes excused because only processes outside the
+	// installer's tree opened those paths — named, per run, not a standing rule.
+	Attribution string   `json:"attribution"`
+	Background  []string `json:"background_changes,omitempty"`
 	// Wrapped is the fail-closed case: the journal overwrote records before we
 	// read them, so the window cannot be accounted for and the run cannot claim
 	// the invariant held.
@@ -298,8 +303,12 @@ func (r *Result) Summary(required []string) string {
 		for _, d := range r.SystemDisk.TopDirs() {
 			fmt.Fprintf(&b, "   churn    : %s\n", d)
 		}
-		fmt.Fprintf(&b, "   C:       : %d change-journal records examined, %d matched the noise list, %d unexplained\n",
-			r.SystemDisk.Records, r.SystemDisk.Excluded, len(r.SystemDisk.Unexplained))
+		fmt.Fprintf(&b, "   C:       : %d change-journal records examined, %d matched the noise list, %d background, %d unexplained\n",
+			r.SystemDisk.Records, r.SystemDisk.Excluded, len(r.SystemDisk.Background), len(r.SystemDisk.Unexplained))
+		fmt.Fprintf(&b, "   attrib.  : %s\n", r.SystemDisk.Attribution)
+		for _, u := range r.SystemDisk.Background {
+			fmt.Fprintf(&b, "              ~ %s\n", u)
+		}
 		for i, u := range r.SystemDisk.Unexplained {
 			if i >= 20 {
 				fmt.Fprintf(&b, "              … and %d more\n", len(r.SystemDisk.Unexplained)-20)
