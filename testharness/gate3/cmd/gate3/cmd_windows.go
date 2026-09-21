@@ -470,6 +470,12 @@ func cmdEnforcementProbe(args []string) error {
 		return err
 	}
 	if *dest != "" {
+		// Each variant is tried and reported, so a refusal says WHICH access
+		// pattern Low cannot use: run 35666421442 refused the run log's
+		// O_APPEND create with full control and an inherited (OI)(CI)(NW) Low
+		// label on both directories. syscall.Open (Go 1.25) asks O_APPEND for
+		// FILE_APPEND_DATA|FILE_WRITE_ATTRIBUTES|FILE_WRITE_EA|READ_CONTROL|
+		// SYNCHRONIZE with OPEN_ALWAYS; O_TRUNC asks GENERIC_WRITE.
 		meta := filepath.Join(*dest, "_auros")
 		deeper := filepath.Join(*dest, "Documents", "Term 2")
 		for _, d := range []string{meta, deeper} {
@@ -477,21 +483,45 @@ func cmdEnforcementProbe(args []string) error {
 				return err
 			}
 		}
-		f, err := os.OpenFile(filepath.Join(meta, "run-probe.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			return err
-		}
-		_, werr := f.WriteString("{}\n")
-		if cerr := f.Close(); werr == nil {
-			werr = cerr
-		}
-		if werr != nil {
+		appendTo := func(p string, flag int) error {
+			f, err := os.OpenFile(p, flag, 0o644)
+			if err != nil {
+				return err
+			}
+			_, werr := f.WriteString("{}\n")
+			if cerr := f.Close(); werr == nil {
+				werr = cerr
+			}
 			return werr
 		}
-		if err := os.WriteFile(filepath.Join(deeper, "notes.docx.auros-partial"), []byte("x"), 0o644); err != nil {
-			return err
+		failed := 0
+		for _, v := range []struct {
+			what string
+			do   func() error
+		}{
+			{"create+truncate write (GENERIC_WRITE) in _auros", func() error {
+				return os.WriteFile(filepath.Join(meta, "truncated.bin"), []byte("x"), 0o644)
+			}},
+			{"append to an existing file in _auros", func() error {
+				return appendTo(filepath.Join(meta, "truncated.bin"), os.O_WRONLY|os.O_APPEND)
+			}},
+			{"create for append, as the run log does, in _auros", func() error {
+				return appendTo(filepath.Join(meta, "run-probe.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND)
+			}},
+			{"create+truncate write, as a copy does, two levels down", func() error {
+				return os.WriteFile(filepath.Join(deeper, "notes.docx.auros-partial"), []byte("x"), 0o644)
+			}},
+		} {
+			if err := v.do(); err != nil {
+				failed++
+				fmt.Printf("REFUSED %s: %v\n", v.what, err)
+			} else {
+				fmt.Printf("ok      %s\n", v.what)
+			}
 		}
-		fmt.Println("created directories, a run log and a file")
+		if failed > 0 {
+			return fmt.Errorf("%d of the installer's write patterns were refused", failed)
+		}
 	}
 	if *source != "" {
 		n := 0

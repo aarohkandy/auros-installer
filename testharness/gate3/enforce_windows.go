@@ -175,7 +175,8 @@ func ApplyEnforcement(s *UserSession, workDir, sourceRoot string, lowDirs []stri
 		said, code := runAs(low, workDir, self, "enforcement-probe", "-dest", dir)
 		line := fmt.Sprintf("the installer's write pattern under %s at Low: exit %d: %s", d, code, strings.TrimSpace(said))
 		if code != 0 {
-			for _, p := range []string{d, dir, filepath.Join(dir, "_auros")} {
+			// icacls prints the mandatory label with the DACL; the files too.
+			for _, p := range []string{d, dir, filepath.Join(dir, "_auros"), filepath.Join(dir, "_auros", "*")} {
 				out, _ := exec.Command("icacls", p).CombinedOutput()
 				line += "\n  icacls " + p + ": " + strings.TrimSpace(string(out))
 			}
