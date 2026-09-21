@@ -78,6 +78,11 @@ func buildPlanWith(a *Archive, l *Layout, r *Router) (*Plan, error) {
 	p := &Plan{Archive: a, Layout: l}
 	targets := make(map[string]string, len(entries)) // target -> entry path
 	var escapes []string
+	// Resolved once per directory, not once per file: 18,000 files live in a
+	// few hundred directories, and resolving a path walks it component by
+	// component.
+	realDir := make(map[string]string)
+	resolveErr := make(map[string]error)
 
 	for _, e := range entries {
 		// Re-validate the path rather than trusting it. The manifest was
@@ -118,6 +123,26 @@ func buildPlanWith(a *Archive, l *Layout, r *Router) (*Plan, error) {
 			if !underPath(target, l.Home) {
 				escapes = append(escapes, fmt.Sprintf("%q would be written to %s, which is not inside %s",
 					e.Path, target, l.Home))
+				continue
+			}
+			// And the same question asked of the path the bytes would REALLY
+			// go to, with every link that exists today resolved. The lexical
+			// check above cannot see a linked directory; this one is the
+			// reason a linked ~/Documents is refused before the first write
+			// instead of followed.
+			dir := filepath.Dir(target)
+			rd, seen := realDir[dir]
+			if !seen {
+				rd, resolveErr[dir] = resolveDeep(dir)
+				realDir[dir] = rd
+			}
+			if rerr := resolveErr[dir]; rerr != nil {
+				escapes = append(escapes, fmt.Sprintf("%q: cannot resolve %s: %v", e.Path, dir, rerr))
+				continue
+			}
+			if !underPath(rd, l.realHome) {
+				escapes = append(escapes, fmt.Sprintf("%q would be written to %s, which really is %s "+
+					"(a link), and that is not inside %s", e.Path, target, filepath.Join(rd, filepath.Base(target)), l.realHome))
 				continue
 			}
 			if prev, dup := targets[target]; dup {

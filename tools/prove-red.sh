@@ -275,6 +275,206 @@ m13() {
 		w("%s", preVerifyHeading)'
 }
 
+# ── M14 ───────────────────────────────────────────────────────────────────
+# FATAL, and real: the finder stops looking one level down. The Windows half
+# writes <mount>/auros-backup/_auros/manifest.tsv; the first version of the
+# finder only ever stat'ed <mount>/_auros, so an intact archive was reported
+# as "no backup drive is attached", exit 0, after the Windows disk was gone.
+m14() {
+  mutate "$1/internal/restore/archive.go" \
+    '	out := []string{root, filepath.Join(root, manifest.ArchiveSubdir)}
+	ents, err := os.ReadDir(root)' \
+    '	out := []string{root}
+	ents, err := os.ReadDir(root)
+	ents = nil'
+}
+
+# ── M14b ──────────────────────────────────────────────────────────────────
+# The agreed name moves. Every stick made before the change carries the old
+# one, so this is pinned as a literal where the constant is defined...
+m14b() {
+  mutate "$1/internal/manifest/manifest.go" \
+    '	ArchiveSubdir = "auros-backup"' \
+    '	ArchiveSubdir = "auros-archive"'
+}
+
+# ── M14c ──────────────────────────────────────────────────────────────────
+# ...and where the Windows half uses it, which is where the halves drifted
+# apart the first time: its own literal instead of the shared constant.
+m14c() {
+  mutate "$1/cmd/auros-migrate/main.go" \
+    '	d, rejected, err := r.Choose(manifest.ArchiveSubdir, inventoryBytes)' \
+    '	d, rejected, err := r.Choose("auros-archive", inventoryBytes)'
+}
+
+# ── M15 ───────────────────────────────────────────────────────────────────
+# FATAL, and real: Summary.Clean stops reading the Wi-Fi and printer reports.
+# A refused keyfile became "Your files are here", a calm popup and a stamp
+# that stopped the unit ever running again.
+m15() {
+  mutate "$1/internal/restore/run.go" \
+    '		if h != nil && len(h.Problems) > 0 {
+			return false
+		}' \
+    '		if false && h != nil && len(h.Problems) > 0 {
+			return false
+		}'
+}
+
+# ── M16 ───────────────────────────────────────────────────────────────────
+# The layout's check goes back to being lexical: a user directory that is a
+# link out of the home passes because its NAME is inside the home.
+m16() {
+  mutate "$1/internal/restore/layout.go" \
+    '		if !underPath(rp, realHome) {
+			bad = append(bad, fmt.Sprintf("%s=%s (from %s) is a link' \
+    '		if false && !underPath(rp, realHome) {
+			bad = append(bad, fmt.Sprintf("%s=%s (from %s) is a link'
+}
+
+# ── M16b ──────────────────────────────────────────────────────────────────
+# The plan's check goes back to being lexical: a link one level INSIDE a user
+# directory — which the layout never looks at — carries the file out.
+m16b() {
+  mutate "$1/internal/restore/plan.go" \
+    '			if !underPath(rd, l.realHome) {' \
+    '			if false && !underPath(rd, l.realHome) {'
+}
+
+# ── M16c ──────────────────────────────────────────────────────────────────
+# The write path stops re-checking, so a directory swapped for a link AFTER
+# the plan was checked is followed. Both of its checks are removed; either one
+# alone is enough to refuse.
+m16c() {
+  mutate "$1/internal/restore/run.go" \
+    '	if err := insideHome(dir, l); err != nil {
+		base.Outcome, base.Final, base.Detail = OutFailed, target, err.Error()
+		return base
+	}
+	if err := mkdirAllOwned(' \
+    '	if err := mkdirAllOwned('
+  mutate "$1/internal/restore/run.go" \
+    '	if err := insideHome(dir, l); err != nil {
+		base.Outcome, base.Final, base.Detail = OutFailed, target, err.Error()
+		return base
+	}
+	if err := writeAtomic(' \
+    '	if err := writeAtomic('
+}
+
+# ── M17 ───────────────────────────────────────────────────────────────────
+# MAJOR, and real: a root run stops handing its files over. Every 0600 file
+# lands owned by root in a home owned by the user, and the re-check passes
+# because root can read it all back.
+m17() {
+  mutate "$1/internal/restore/owner.go" \
+    '	if o == nil {
+		return nil
+	}
+	fn := o.chown' \
+    '	if o == nil || true {
+		return nil
+	}
+	fn := o.chown'
+}
+
+# ── M18 ───────────────────────────────────────────────────────────────────
+# MAJOR, and real: "was this renamed" is derived from the outcome again, so
+# the second run — which finds its own earlier copy and says already-there —
+# stops telling the user that the file under its own name is not theirs.
+m18() {
+  mutate "$1/internal/restore/report.go" \
+    '		if !r.Renamed {
+			continue
+		}' \
+    '		if r.Outcome != OutPlacedAside {
+			continue
+		}'
+}
+
+# ── M19 ───────────────────────────────────────────────────────────────────
+# MAJOR, and real: a Thumbs.db beside the archive is counted as a stranger's
+# file again, and the restore tells a school its only copy is damaged.
+m19() {
+  mutate "$1/internal/verify/verify.go" \
+    '		if isLitter(stored) {' \
+    '		if false && isLitter(stored) {'
+}
+
+# ── M20 ───────────────────────────────────────────────────────────────────
+# The re-check stops asking whether two entries claim one file. Every hash
+# matches, because it is the same file hashed twice.
+m20() {
+  mutate "$1/internal/restore/run.go" \
+    '		if prev, dup := claimed[key]; dup {' \
+    '		if prev, dup := claimed[key]; false && dup {'
+}
+
+# ── M20b ──────────────────────────────────────────────────────────────────
+# The write path stops treating another entry's name as taken, so an aside
+# name lands on it and one of the user's files ends up existing nowhere.
+m20b() {
+  mutate "$1/internal/restore/run.go" \
+    '		if target != it.Route.Target && reserved[filepath.Clean(target)] {' \
+    '		if false && target != it.Route.Target && reserved[filepath.Clean(target)] {'
+}
+
+# ── M21 ───────────────────────────────────────────────────────────────────
+# An --archive path that holds nothing is reported as "no backup attached"
+# again, which the command answers with exit 0.
+m21() {
+  mutate "$1/internal/restore/archive.go" \
+    '		case f.Explicit != "":
+			return nil, fmt.Errorf("%w: %s' \
+    '		case false:
+			return nil, fmt.Errorf("%w: %s'
+}
+
+# ── M22 ───────────────────────────────────────────────────────────────────
+# The finder stops distinguishing an attached-and-empty drive from nothing
+# attached.
+m22() {
+  mutate "$1/internal/restore/archive.go" \
+    '		case len(f.SearchedRemovable) > 0:' \
+    '		case false:'
+}
+
+# ── M22b ──────────────────────────────────────────────────────────────────
+# The command collapses "a drive is attached and held no backup" back into
+# the quiet exit 0.
+m22b() {
+  mutate "$1/cmd/auros-restore/main.go" \
+    '		return exitNoArchiveOnMedia, fmt.Sprintf(' \
+    '		return exitOK, fmt.Sprintf('
+}
+
+# ── M23 ───────────────────────────────────────────────────────────────────
+# WriteReport stops recording where it wrote, which is what made the caller
+# write the report a second time with O_TRUNC.
+m23() {
+  mutate "$1/internal/restore/report.go" \
+    '		prev := s.ReportFilePath
+		s.ReportFilePath = p' \
+    '		prev := s.ReportFilePath'
+}
+
+# ── M24 ───────────────────────────────────────────────────────────────────
+# The sweep is removed: one stale .part per interruption, forever.
+m24() {
+  mutate "$1/internal/restore/run.go" \
+    '		s.PartialsSwept = sweepPartials(p)' \
+    '		s.PartialsSwept = nil'
+}
+
+# ── M24b ──────────────────────────────────────────────────────────────────
+# The sweep gets greedy and deletes a user's own file that happens to end
+# in .part.
+m24b() {
+  mutate "$1/internal/restore/run.go" \
+    '	return strings.HasPrefix(name, partialPrefix) && strings.HasSuffix(name, partialSuffix) &&' \
+    '	return strings.HasSuffix(name, partialSuffix) || strings.HasPrefix(name, partialPrefix) &&'
+}
+
 run_case M01 "the archive check stops being a gate" \
   ./internal/restore 'TestExecute_AWrongHashInTheArchiveAbortsBeforeAnythingIsWritten' \
   'file(s) were written despite a damaged archive' m01
@@ -317,6 +517,61 @@ run_case M12 "the restore shells out" \
 run_case M13 "damaged files are counted instead of named" \
   ./internal/restore 'TestExecute_AWrongHashInTheArchiveAbortsBeforeAnythingIsWritten' \
   'does not name the damaged file' m13
+
+run_case M14 "the finder stops looking one folder down (FATAL)" \
+  ./internal/restore 'TestFinder_FindsTheArchiveWhereTheWindowsHalfActuallyPutsIt' \
+  'the finder did not see it' m14
+run_case M14b "the archive folder's agreed name moves" \
+  ./internal/manifest 'TestArchiveSubdir_IsTheNameOnSticksInTheField' \
+  'Sticks made by every earlier build' m14b
+run_case M14c "the Windows half stops using the agreed name" \
+  ./cmd/auros-migrate 'TestResolveDestination_TheAutomaticChoiceIsTheFolderTheRestoreLooksIn' \
+  'the restore on the new machine looks for' m14c
+run_case M15 "Clean() stops reading the Wi-Fi and printer reports (FATAL)" \
+  ./internal/restore 'TestSummary_AWiFiProblemMakesTheRunUnclean' \
+  'the run is CLEAN with a Wi-Fi problem in it' m15
+run_case M16 "the layout's link check goes back to lexical" \
+  ./internal/restore 'TestNewLayout_AUserDirectoryThatIsALinkOutOfHomeIsRefused' \
+  'want ErrDirOutsideHome' m16
+run_case M16b "the plan's link check goes back to lexical" \
+  ./internal/restore 'TestPlan_ALinkInsideAUserDirectoryIsRefusedBeforeAnyWrite' \
+  'a link inside ~/Documents was planned' m16b
+run_case M16c "the write path stops re-checking for a swapped-in link" \
+  ./internal/restore 'TestExecute_ADirectorySwappedForALinkAfterPlanningIsNotFollowed' \
+  'followed a link swapped in after planning' m16c
+run_case M17 "a root run stops handing files to the home's owner" \
+  ./internal/restore 'TestExecute_HandsEveryCreatedPathToTheHomeOwner' \
+  'was not handed over' m17
+run_case M18 "the second run forgets the file was renamed" \
+  ./internal/restore 'TestExecute_TheSecondRunStillSaysTheFileWasRenamed' \
+  'second run: 0 renamed files' m18
+run_case M19 "a Thumbs.db is a damaged archive again" \
+  ./internal/verify 'TestVerify_LitterBesideAPerfectArchiveIsNamedNotCounted' \
+  'litter made a perfect archive fail' m19
+run_case M20 "the re-check stops catching two entries claiming one file" \
+  ./internal/restore 'TestReVerify_TwoEntriesClaimingOneFileIsADisagreement' \
+  'the re-check called it clean' m20
+run_case M20b "an aside name can land on another entry's real name" \
+  ./internal/restore 'TestExecute_TwoEntriesWithTheSameBytesCannotCollapseIntoOneFile' \
+  'are both reported as the file at' m20b
+run_case M21 "a wrong --archive path reads as no backup attached" \
+  ./internal/restore 'TestFinder_AnExplicitArchiveThatIsNotThereIsNotAnAbsenceOfBackups' \
+  'The user typed a path' m21
+run_case M22 "an attached, empty drive reads as nothing attached" \
+  ./internal/restore 'TestFinder_ADriveThatIsAttachedButEmptyIsNotNothingAttached' \
+  'want ErrNoArchiveOnAttachedMedia' m22
+run_case M22b "the command answers an attached, empty drive with exit 0" \
+  ./cmd/auros-restore 'TestFindRefusal_OnlyNothingAttachedIsAQuietNoOp' \
+  'became a quiet exit 0' m22b
+run_case M23 "the report forgets its own path, inviting a second O_TRUNC write" \
+  ./internal/restore 'TestWriteReport_WritesOnceAndRecordsThePathItWroteTo' \
+  'left Summary.ReportFilePath as' m23
+run_case M24 "stale .part files are never swept" \
+  ./internal/restore 'TestExecute_SweepsAStalePartialFromAnInterruptedRun' \
+  'survived a full clean run' m24
+run_case M24b "the sweep deletes a user's own .part file" \
+  ./internal/restore 'TestSweepPartials_TouchesOnlyItsOwnPatternInItsOwnDirectories' \
+  'was not its to remove' m24b
 
 echo
 echo "prove-red: $PASS caught, $FAIL not caught."

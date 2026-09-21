@@ -43,6 +43,12 @@ const (
 	exitAmbiguous    = 4 // several archives attached; the user must choose
 	exitNoArchive    = 5 // --require-archive was set and none was found
 	exitCannotReport = 6 // the restore ran but the user could not be told
+	// exitNoArchiveOnMedia: a removable drive IS attached and none of them
+	// holds a backup. Not a quiet no-op: on a machine running this program the
+	// most likely reason somebody plugged in a drive is that it is the backup,
+	// and the first version of this command answered "nothing to do", exit 0,
+	// for an archive it had simply failed to look inside.
+	exitNoArchiveOnMedia = 7
 )
 
 const usage = `auros-restore — put your files back on this computer.
@@ -120,6 +126,15 @@ func run() (int, error) {
 	if err != nil {
 		return exitUsage, err
 	}
+	// Under a root run (an administrator with --home), everything this
+	// command creates in the home directory — the state directory, the log,
+	// the stamp, the report — is handed to whoever owns that home. Decided
+	// before anything is created, and a root run that cannot tell who that is
+	// stops here rather than leaving root-owned files the user cannot touch.
+	own, err := restore.OwnershipFor(layout.Home)
+	if err != nil {
+		return exitUsage, err
+	}
 
 	stateDir := filepath.Join(layout.Home, ".local", "state", "auros-restore")
 	stamp := cfg.stamp
@@ -137,7 +152,7 @@ func run() (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), signals.Interrupting()...)
 	defer stop()
 
-	log, logPath := openLog(stateDir)
+	log, logPath := openLog(stateDir, own)
 	if log != nil {
 		defer log.Close()
 	}
@@ -151,26 +166,22 @@ func run() (int, error) {
 	// ---- FIND ----
 	finder := &restore.Finder{Explicit: cfg.archive}
 	archives, err := finder.Find()
-	switch {
-	case errors.Is(err, restore.ErrAmbiguous):
-		say("%v", err)
-		logEvent("ambiguous", runlog.Fields{"count": len(archives)})
-		return exitAmbiguous, nil
-	case errors.Is(err, restore.ErrNoArchive):
-		logEvent("no-archive", runlog.Fields{"searched": strings.Join(finder.Searched, " ")})
-		if cfg.requireArchive {
-			return exitNoArchive, err
+	if err != nil {
+		code, msg := findRefusal(err, cfg.requireArchive)
+		say("%s", msg)
+		logEvent("find-refused", runlog.Fields{
+			"exit": code, "error": err.Error(),
+			"searched":  strings.Join(finder.Searched, " "),
+			"removable": strings.Join(finder.SearchedRemovable, " "),
+			"count":     len(archives),
+		})
+		if code == exitOK || !cfg.quiet {
+			// Already said on the terminal. Under --quiet — which is how the
+			// login unit runs it — the returned error is the only thing that
+			// reaches the journal, so it is returned.
+			return code, nil
 		}
-		// No backup attached is the ordinary state of a machine that was not
-		// migrated. It is not an error and it does not get a scary note on the
-		// desktop: a fresh Auros laptop has no archive and its owner should
-		// never see a warning about one.
-		say("No backup drive with files to restore is attached. Nothing to do.")
-		return exitOK, nil
-	case err != nil:
-		say("The backup is there but cannot be read: %v", err)
-		logEvent("archive-unreadable", runlog.Fields{"error": err.Error()})
-		return exitArchiveBad, err
+		return code, err
 	}
 	a := archives[0]
 	say("Backup found: %s", a.Root)
@@ -235,14 +246,12 @@ func run() (int, error) {
 		summary.NotifyAttempt = "not attempted (--no-notify)"
 	}
 
+	// Written ONCE, after the notification result is known; WriteReport
+	// records its own path before rendering. There is deliberately no second
+	// write "to fix it up": the first version had one, with O_TRUNC and its
+	// error discarded, and the run it was most likely to empty was the one that
+	// stopped because the disk was full.
 	reportPath, reportErr := restore.WriteReport(summary, layout)
-	summary.ReportFilePath = reportPath
-	if reportErr == nil {
-		// Rendered once more now that the path and the notification result are
-		// known, so the file on the desktop says what actually happened rather
-		// than what was true a moment before it was written.
-		_ = os.WriteFile(reportPath, []byte(restore.RenderReport(summary, layout)), 0o644)
-	}
 
 	say("")
 	say("%s", restore.RenderReport(summary, layout))
@@ -271,7 +280,7 @@ func run() (int, error) {
 		return exitIncomplete, runErr
 	}
 	if !cfg.dryRun {
-		if err := writeStamp(stamp, summary); err != nil {
+		if err := writeStamp(stamp, summary, own); err != nil {
 			fmt.Fprintf(os.Stderr, "auros-restore: could not write the stamp file: %v\n", err)
 		}
 	}
@@ -282,17 +291,20 @@ func run() (int, error) {
 // not run it again. It is written ONLY on a clean run: a run that had a problem
 // deserves another attempt at the next login, because the usual cause is a USB
 // stick that was not plugged in yet.
-func writeStamp(path string, s *restore.Summary) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+func writeStamp(path string, s *restore.Summary, own *restore.Ownership) error {
+	if err := restore.MkdirAllOwned(filepath.Dir(path), 0o700, own); err != nil {
 		return err
 	}
 	body := fmt.Sprintf("auros-restore finished cleanly\nfiles: %d\narchive: %s\nat: %s\n",
 		s.FilesRestored(), s.Archive.Digest, s.FinishedAt.Format(time.RFC3339))
-	return os.WriteFile(path, []byte(body), 0o644)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return err
+	}
+	return own.Apply(path)
 }
 
-func openLog(stateDir string) (*runlog.Logger, string) {
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+func openLog(stateDir string, own *restore.Ownership) (*runlog.Logger, string) {
+	if err := restore.MkdirAllOwned(stateDir, 0o700, own); err != nil {
 		return nil, ""
 	}
 	p := filepath.Join(stateDir, "restore.log")
@@ -300,7 +312,48 @@ func openLog(stateDir string) (*runlog.Logger, string) {
 	if err != nil {
 		return nil, ""
 	}
+	if err := own.Apply(p); err != nil {
+		f.Close()
+		return nil, ""
+	}
 	return runlog.NewWriter(f, nil), p
+}
+
+// findRefusal decides what the command does when the finder did not hand back
+// exactly one archive: the exit code, and the sentence the operator reads.
+//
+// It is a pure function so every branch can be driven from a test. The first
+// version was an inline switch that sent three different situations — nothing
+// attached; a drive attached with the archive one folder down, where the
+// finder never looked; and an --archive path the user typed wrong — to the
+// same "Nothing to do", exit 0. Only the first of those is a no-op.
+//
+// Each sentinel is matched by name and none wraps another, so an error this
+// function does not recognise falls through to the last branch and fails
+// closed.
+func findRefusal(err error, requireArchive bool) (int, string) {
+	switch {
+	case errors.Is(err, restore.ErrAmbiguous):
+		return exitAmbiguous, err.Error()
+	case errors.Is(err, restore.ErrExplicitArchiveMissing):
+		return exitUsage, fmt.Sprintf("There is no backup in the folder you gave with --archive.\n%v", err)
+	case errors.Is(err, restore.ErrNoArchiveOnAttachedMedia):
+		return exitNoArchiveOnMedia, fmt.Sprintf(
+			"A drive is plugged in, but no backup was found on it.\n"+
+				"If that drive IS your backup, do not wipe it — tell whoever set this computer up, "+
+				"and show them this:\n%v", err)
+	case errors.Is(err, restore.ErrNoArchive):
+		if requireArchive {
+			return exitNoArchive, err.Error()
+		}
+		// No backup attached is the ordinary state of a machine that was not
+		// migrated. It is not an error and it does not get a scary note on the
+		// desktop: a fresh Auros laptop has no archive and its owner should
+		// never see a warning about one.
+		return exitOK, "No backup drive with files to restore is attached. Nothing to do."
+	default:
+		return exitArchiveBad, fmt.Sprintf("The backup is there but cannot be read: %v", err)
+	}
 }
 
 func progressPrinter(say func(string, ...any), quiet bool) func(done, total int, path string) {

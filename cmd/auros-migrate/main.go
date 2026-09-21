@@ -456,7 +456,7 @@ func resolveDestination(r *safety.Resolver, destFlag string, inventoryBytes int6
 		}
 		return d, nil
 	}
-	d, rejected, err := r.Choose("auros-backup", inventoryBytes)
+	d, rejected, err := r.Choose(manifest.ArchiveSubdir, inventoryBytes)
 	if s := safety.DescribeRejections(rejected); s != "" {
 		fmt.Print("\n" + s)
 	}

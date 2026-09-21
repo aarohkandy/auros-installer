@@ -46,9 +46,28 @@ import (
 	"github.com/aarohkandy/auros-installer/internal/manifest"
 )
 
+// The three "not found" outcomes are three DIFFERENT sentinels, and none of them
+// wraps another. That is deliberate: the caller decides an exit code by
+// matching them, and the first version collapsed all three into ErrNoArchive,
+// so "the stick is attached and the finder did not look inside it" and "you
+// typed the wrong path" were both reported as "no backup drive is attached,
+// nothing to do", exit 0, forever. A caller that forgets one of these now falls
+// through to its generic error branch, which fails closed.
 var (
-	// ErrNoArchive means no attached volume carried a readable manifest.
+	// ErrNoArchive means nothing that could plausibly carry an archive was
+	// attached: no removable volume was searched at all. This is the ordinary
+	// state of an Auros laptop that was never migrated, and the ONLY one of the
+	// three that is a quiet no-op.
 	ErrNoArchive = errors.New("restore: no archive found on any attached volume")
+	// ErrNoArchiveOnAttachedMedia means a removable volume WAS attached and
+	// searched, and held no manifest. That is not "nothing to do": it is a
+	// drive that somebody plugged in for a reason, and the most likely reason
+	// on a machine running this program is that it is the backup.
+	ErrNoArchiveOnAttachedMedia = errors.New("restore: a removable drive is attached and no backup was found on it")
+	// ErrExplicitArchiveMissing means --archive named a directory with no
+	// manifest in it or one level below. The user gave an instruction that
+	// could not be honoured, which is a usage error, never "nothing to do".
+	ErrExplicitArchiveMissing = errors.New("restore: the folder given with --archive does not hold a backup")
 	// ErrAmbiguous means several DIFFERENT archives are attached. We refuse to
 	// pick one. Restoring the wrong archive onto a fresh machine is not
 	// recoverable by the user, and "it chose the newest" is exactly the kind of
@@ -102,8 +121,13 @@ type Finder struct {
 	// MetaDir overrides the metadata directory name. Empty means manifest.MetaDir.
 	MetaDir string
 	// Searched records every directory actually examined, so a "not found"
-	// message can print where it looked instead of asserting an absence.
+	// message can print where it looked instead of asserting an absence. Each
+	// one was probed itself AND one level inside it.
 	Searched []string
+	// SearchedRemovable is the subset of Searched that looked like removable
+	// media. It is what separates ErrNoArchive from
+	// ErrNoArchiveOnAttachedMedia.
+	SearchedRemovable []string
 }
 
 // DefaultExtraRoots are the directories whose immediate children are
@@ -136,7 +160,46 @@ var pseudoFS = map[string]bool{
 	"sysfs": true, "tracefs": true,
 }
 
+// removableFS are filesystems a USB stick or external drive is formatted with.
+// The Windows half writes to whatever the school had, which is overwhelmingly
+// FAT32, exFAT or NTFS; the kernel reports NTFS as ntfs3 (in-kernel driver) or
+// fuseblk (ntfs-3g), and both are listed because which one a given image uses
+// is not something to remember.
+var removableFS = map[string]bool{
+	"vfat": true, "msdos": true, "exfat": true, "ntfs": true, "ntfs3": true,
+	"fuseblk": true, "udf": true, "iso9660": true, "hfsplus": true,
+}
+
+// removableParents are where udisks2 and fstab conventions mount removable
+// media. A mount under one of these is removable whatever its filesystem.
+var removableParents = []string{"/run/media", "/media", "/mnt"}
+
+func looksRemovable(path, fstype string) bool {
+	if removableFS[fstype] {
+		return true
+	}
+	for _, p := range removableParents {
+		if underPath(path, p) && filepath.Clean(path) != p {
+			return true
+		}
+	}
+	return false
+}
+
 // Find returns every DISTINCT archive it can see.
+//
+// Every candidate root is probed at three depths, in this order:
+//
+//	<root>/_auros/manifest.tsv                 an archive at the root itself
+//	<root>/auros-backup/_auros/manifest.tsv    where the Windows half puts it
+//	<root>/<any subdir>/_auros/manifest.tsv    anywhere one level down
+//
+// The second line is manifest.ArchiveSubdir, the SAME constant the Windows
+// side hands to safety.Resolver.Choose, and it is probed by name even when the
+// root cannot be listed. The third is the belt to its braces: a stick where
+// somebody renamed the folder, or an archive made by a build that spelled it
+// differently, is still found. It is one level, never a recursive walk — a
+// search that wandered through a 1 TB drive at login would be its own failure.
 //
 // Two mount points showing the same archive — a USB stick bind-mounted twice,
 // which is ordinary on a systemd machine — are one archive, not an ambiguity.
@@ -145,20 +208,22 @@ var pseudoFS = map[string]bool{
 // two sticks.
 func (f *Finder) Find() ([]*Archive, error) {
 	f.Searched = nil
+	f.SearchedRemovable = nil
 	meta := f.MetaDir
 	if meta == "" {
 		meta = manifest.MetaDir
 	}
 
 	type cand struct {
-		root   string
-		mount  string
-		fstype string
+		root      string
+		mount     string
+		fstype    string
+		removable bool
 	}
 	var cands []cand
 	seenRoot := make(map[string]bool)
 
-	add := func(root, mount, fstype string) {
+	add := func(root, mount, fstype string, removable bool) {
 		abs, err := filepath.Abs(root)
 		if err != nil {
 			return
@@ -167,11 +232,11 @@ func (f *Finder) Find() ([]*Archive, error) {
 			return
 		}
 		seenRoot[abs] = true
-		cands = append(cands, cand{root: abs, mount: mount, fstype: fstype})
+		cands = append(cands, cand{root: abs, mount: mount, fstype: fstype, removable: removable})
 	}
 
 	if f.Explicit != "" {
-		add(f.Explicit, f.Explicit, "")
+		add(f.Explicit, f.Explicit, "", false)
 	} else {
 		mountsFn := f.Mounts
 		if mountsFn == nil {
@@ -189,7 +254,7 @@ func (f *Finder) Find() ([]*Archive, error) {
 			if pseudoFS[m.FSType] {
 				continue
 			}
-			add(m.Path, m.Path, m.FSType)
+			add(m.Path, m.Path, m.FSType, looksRemovable(m.Path, m.FSType))
 		}
 		extra := f.ExtraRoots
 		if extra == nil {
@@ -202,7 +267,9 @@ func (f *Finder) Find() ([]*Archive, error) {
 			}
 			for _, e := range ents {
 				if e.IsDir() {
-					add(filepath.Join(parent, e.Name()), parent, "")
+					// A child of a removable-media parent is removable media,
+					// whatever the mount list said about it.
+					add(filepath.Join(parent, e.Name()), parent, "", true)
 				}
 			}
 		}
@@ -213,39 +280,61 @@ func (f *Finder) Find() ([]*Archive, error) {
 
 	var found []*Archive
 	var manifestInfos []os.FileInfo
+	seenProbe := make(map[string]bool)
 	for _, c := range cands {
-		mp := filepath.Join(c.root, meta, manifest.FileName)
 		f.Searched = append(f.Searched, c.root)
-		st, err := os.Stat(mp)
-		if err != nil || !st.Mode().IsRegular() {
-			continue
+		if c.removable {
+			f.SearchedRemovable = append(f.SearchedRemovable, c.root)
 		}
-		dup := false
-		for _, prev := range manifestInfos {
-			if os.SameFile(prev, st) {
-				dup = true
-				break
+		for _, root := range probeRoots(c.root) {
+			if seenProbe[root] {
+				continue
 			}
+			seenProbe[root] = true
+			mp := filepath.Join(root, meta, manifest.FileName)
+			st, err := os.Stat(mp)
+			if err != nil || !st.Mode().IsRegular() {
+				continue
+			}
+			dup := false
+			for _, prev := range manifestInfos {
+				if os.SameFile(prev, st) {
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
+			a, aerr := loadArchive(root, mp)
+			if aerr != nil {
+				// A manifest that is present but unreadable is a FINDING, not a
+				// non-result. It is returned as an error so the user is told their
+				// archive is damaged rather than told no archive exists.
+				return nil, fmt.Errorf("restore: %s: %w", mp, aerr)
+			}
+			a.MountPoint, a.FSType = c.mount, c.fstype
+			manifestInfos = append(manifestInfos, st)
+			found = append(found, a)
 		}
-		if dup {
-			continue
-		}
-		a, aerr := loadArchive(c.root, mp)
-		if aerr != nil {
-			// A manifest that is present but unreadable is a FINDING, not a
-			// non-result. It is returned as an error so the user is told their
-			// archive is damaged rather than told no archive exists.
-			return nil, fmt.Errorf("restore: %s: %w", mp, aerr)
-		}
-		a.MountPoint, a.FSType = c.mount, c.fstype
-		manifestInfos = append(manifestInfos, st)
-		found = append(found, a)
 	}
 
 	sort.Slice(found, func(i, j int) bool { return found[i].Root < found[j].Root })
 
 	if len(found) == 0 {
-		return nil, fmt.Errorf("%w (looked in: %s)", ErrNoArchive, strings.Join(f.Searched, ", "))
+		where := strings.Join(f.Searched, ", ")
+		switch {
+		case f.Explicit != "":
+			return nil, fmt.Errorf("%w: %s — looked for %s and for %s, and one folder deeper, and none of them is there",
+				ErrExplicitArchiveMissing, f.Explicit,
+				filepath.Join(f.Explicit, meta, manifest.FileName),
+				filepath.Join(f.Explicit, manifest.ArchiveSubdir, meta, manifest.FileName))
+		case len(f.SearchedRemovable) > 0:
+			return nil, fmt.Errorf("%w (looked on: %s, and one folder inside each)",
+				ErrNoArchiveOnAttachedMedia, strings.Join(f.SearchedRemovable, ", "))
+		default:
+			return nil, fmt.Errorf("%w (looked in: %s, and one folder inside each)", ErrNoArchive, where)
+		}
 	}
 	// Distinct archives with the same digest describe identical data. That is a
 	// copy of the same archive, not two answers, so it is not an ambiguity.
@@ -265,6 +354,26 @@ func (f *Finder) Find() ([]*Archive, error) {
 		return found, fmt.Errorf("%w — tell it which one with --archive:%s", ErrAmbiguous, b.String())
 	}
 	return found[:1], nil
+}
+
+// probeRoots is every directory under root that may hold an archive: root
+// itself, the agreed subdirectory by name, and each immediate subdirectory.
+// The agreed name comes before the listing so that a root that cannot be
+// listed (permissions on a stick formatted by another machine) is still probed
+// where the archive actually is.
+func probeRoots(root string) []string {
+	out := []string{root, filepath.Join(root, manifest.ArchiveSubdir)}
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return out
+	}
+	for _, e := range ents {
+		if !e.IsDir() || e.Name() == manifest.ArchiveSubdir || e.Name() == manifest.MetaDir {
+			continue
+		}
+		out = append(out, filepath.Join(root, e.Name()))
+	}
+	return out
 }
 
 func loadArchive(root, mp string) (*Archive, error) {

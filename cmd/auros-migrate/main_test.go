@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/aarohkandy/auros-installer/internal/copyengine"
+	"github.com/aarohkandy/auros-installer/internal/manifest"
 	"github.com/aarohkandy/auros-installer/internal/safety"
 	"github.com/aarohkandy/auros-installer/internal/winenv"
 )
@@ -108,6 +109,27 @@ func TestResolveDestination_AcceptsARealDirectoryOnTheBackupDrive(t *testing.T) 
 	}
 	if d.OnSystemVolume() {
 		t.Error("a destination on the backup drive measured as being on the system volume")
+	}
+}
+
+// The automatic choice puts the archive in the folder the Linux restore looks
+// in. The expected path is spelled as a LITERAL: sticks already in the field
+// carry exactly this name, so a change to it is a change the restore on those
+// sticks has to survive, and the person making it should have to edit this line
+// and read why. internal/manifest pins the constant; this pins the call site,
+// which is where the two halves drifted apart the first time — the migrate
+// side passed its own "auros-backup" and the restore never looked inside it.
+func TestResolveDestination_TheAutomaticChoiceIsTheFolderTheRestoreLooksIn(t *testing.T) {
+	r, _, dest := machine(t)
+	d, err := resolveDestination(r, "", 1<<20)
+	if err != nil {
+		t.Fatalf("resolveDestination: %v", err)
+	}
+	if got, want := d.Dir(), filepath.Join(dest, "auros-backup"); got != want {
+		t.Fatalf("the archive goes to %s; the restore on the new machine looks for %s", got, want)
+	}
+	if got := filepath.Base(d.Dir()); got != manifest.ArchiveSubdir {
+		t.Errorf("the migrate side chose %q and manifest.ArchiveSubdir is %q: the two halves disagree", got, manifest.ArchiveSubdir)
 	}
 }
 

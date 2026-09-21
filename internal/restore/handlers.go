@@ -24,7 +24,13 @@ type WiFiHandler struct {
 	SystemDirFor func(asRoot bool, staging string) (dir string, installed bool, why string)
 	// MaxBytes refuses a profile file that is implausibly large for one.
 	MaxBytes int64
+
+	// own is who the staged keyfiles are handed to under a root run. Set by
+	// Execute through ownerAware, never by a caller.
+	own *Ownership
 }
+
+func (h *WiFiHandler) setOwner(o *Ownership) { h.own = o }
 
 const defaultProfileMaxBytes = 1 << 20 // 1 MiB: a wireless profile is ~2 KB
 
@@ -82,6 +88,16 @@ func (h *WiFiHandler) Handle(_ context.Context, items []*Item) (*HandlerReport, 
 		rep.Problems = append(rep.Problems, err.Error())
 		return rep, nil
 	}
+	// Staged in the user's home under a root run: hand them over, or the
+	// user's own session cannot read, install or delete them. INSTALLED ones
+	// are left exactly as netprofile wrote them — a keyfile in
+	// /etc/NetworkManager/system-connections belongs to root, and giving a
+	// Wi-Fi password in /etc to an ordinary user would be its own bug.
+	if !installed {
+		if oerr := h.own.ApplyTree(dir); oerr != nil {
+			rep.Problems = append(rep.Problems, "the staged Wi-Fi files are owned by the wrong account: "+oerr.Error())
+		}
+	}
 	for _, w := range written {
 		switch {
 		case w.Problem != "":
@@ -117,7 +133,11 @@ type PrinterHandler struct {
 	// PlanPath is where the staged plan is written. Empty means no plan file
 	// is written and the decisions are reported only.
 	PlanPath string
+
+	own *Ownership
 }
+
+func (h *PrinterHandler) setOwner(o *Ownership) { h.own = o }
 
 // Handle implements Handler.
 func (h *PrinterHandler) Handle(_ context.Context, items []*Item) (*HandlerReport, error) {
@@ -175,6 +195,8 @@ func (h *PrinterHandler) Handle(_ context.Context, items []*Item) (*HandlerRepor
 			rep.Problems = append(rep.Problems, "could not save the printer plan: "+err.Error())
 		} else if err := os.WriteFile(h.PlanPath, []byte(printers.RenderPlan(decisions)), 0o600); err != nil {
 			rep.Problems = append(rep.Problems, "could not save the printer plan: "+err.Error())
+		} else if err := h.own.ApplyTree(filepath.Dir(h.PlanPath)); err != nil {
+			rep.Problems = append(rep.Problems, "the printer plan is owned by the wrong account: "+err.Error())
 		}
 	}
 	rep.Lines = append(rep.Lines, "")

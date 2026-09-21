@@ -18,6 +18,14 @@ import (
 type Layout struct {
 	Home string
 
+	// realHome is Home with every symlink resolved. Every "is this inside the
+	// home directory" question is asked of RESOLVED paths on both sides,
+	// because a lexical answer is the wrong one twice over: Fedora Atomic
+	// ships /home as a link to /var/home (so a resolved path compared with an
+	// unresolved home refuses every machine we sell), and a linked ~/Documents
+	// passes any lexical check while the bytes land wherever the link points.
+	realHome string
+
 	// dirs is the resolved XDG map, keyed by the spec's variable names.
 	dirs map[string]string
 	// source records where each answer came from, so the report can say
@@ -77,7 +85,11 @@ func NewLayout(home, configHome string, env func(string) string) (*Layout, error
 		}
 	}
 
-	l := &Layout{Home: home, dirs: map[string]string{}, source: map[string]string{}}
+	realHome, err := resolveDeep(home)
+	if err != nil {
+		return nil, fmt.Errorf("restore: resolving the links in home %q: %w", home, err)
+	}
+	l := &Layout{Home: home, realHome: realHome, dirs: map[string]string{}, source: map[string]string{}}
 
 	fromFile, fileErr := readUserDirs(filepath.Join(configHome, "user-dirs.dirs"), home)
 	for _, k := range xdgKeys {
@@ -99,12 +111,31 @@ func NewLayout(home, configHome string, env func(string) string) (*Layout, error
 	// Refuse before planning, not during writing. A directory outside home is
 	// either a misconfiguration or an attack, and either way this program is
 	// the wrong thing to resolve it.
+	//
+	// Asked twice: of the path as configured, and of the path with every link
+	// in it resolved. The second is the one that matters. The first version
+	// asked only the first, so XDG_DOCUMENTS_DIR="$HOME/Documents" with
+	// ~/Documents a link to /data — an ordinary dual-drive 2012 laptop, or a
+	// link somebody put there on purpose — passed, and the restore wrote the
+	// user's files outside their home and called the run clean. The Windows
+	// half has resolved its destination through every link since the junction
+	// attack (internal/safety/destination.go); this is the same rule.
 	var bad []string
 	for _, k := range xdgKeys {
 		p := filepath.Clean(l.dirs[k])
 		l.dirs[k] = p
 		if !underPath(p, home) {
 			bad = append(bad, fmt.Sprintf("%s=%s (from %s)", k, p, l.source[k]))
+			continue
+		}
+		rp, rerr := resolveDeep(p)
+		if rerr != nil {
+			bad = append(bad, fmt.Sprintf("%s=%s (from %s) cannot be resolved: %v", k, p, l.source[k], rerr))
+			continue
+		}
+		if !underPath(rp, realHome) {
+			bad = append(bad, fmt.Sprintf("%s=%s (from %s) is a link: it really is %s, which is not inside %s",
+				k, p, l.source[k], rp, realHome))
 		}
 	}
 	if len(bad) > 0 {
@@ -160,6 +191,39 @@ func readUserDirs(path, home string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// resolveDeep resolves every symlink in p that exists, and keeps the part that
+// does not exist yet as written.
+//
+// filepath.EvalSymlinks fails outright on a path whose last components have
+// not been created — which, on a fresh machine, is every destination this
+// program writes to — so the deepest EXISTING ancestor is resolved and the
+// missing remainder is appended to it. The remainder cannot contain a link,
+// because it does not exist; MkdirAll will create it as plain directories, and
+// the write path checks again once they do.
+func resolveDeep(p string) (string, error) {
+	p = filepath.Clean(p)
+	var rest []string
+	cur := p
+	for {
+		r, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				r = filepath.Join(r, rest[i])
+			}
+			return filepath.Clean(r), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", err
+		}
+		rest = append(rest, filepath.Base(cur))
+		cur = parent
+	}
 }
 
 // underPath reports whether p is root or lies inside it, comparing whole

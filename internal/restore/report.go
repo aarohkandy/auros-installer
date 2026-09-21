@@ -39,13 +39,22 @@ func ReportName(s *Summary) string {
 	return ReportNameProblem
 }
 
-// WriteReport writes the report onto the desktop and returns its path.
+// WriteReport writes the report onto the desktop, records where in
+// s.ReportFilePath, and returns the path.
 //
 // If the desktop directory cannot be written, the report goes to the home
 // directory instead — a report the user cannot find is the same as no report,
 // but a report in the wrong place still beats an error message in a log.
+//
+// The report is rendered ONCE, after its own path is known, and written ONCE.
+// The first version rendered it here, then had the caller render it again and
+// write it a second time with os.WriteFile — which truncates first — "to say
+// what actually happened", with the error discarded. The run most likely to
+// make that second write fail is the one that stopped because the disk filled
+// up, and that run's file is the one called "PLEASE READ". A report that is
+// already correct is never truncated to improve it. Call this after
+// NotifyAttempt is set.
 func WriteReport(s *Summary, l *Layout) (string, error) {
-	body := RenderReport(s, l)
 	desktop, _ := l.Dir("XDG_DESKTOP_DIR")
 	candidates := []string{desktop, l.Home}
 	var lastErr error
@@ -53,12 +62,15 @@ func WriteReport(s *Summary, l *Layout) (string, error) {
 		if dir == "" {
 			continue
 		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := mkdirAllOwned(dir, 0o755, s.own); err != nil {
 			lastErr = err
 			continue
 		}
 		p := filepath.Join(dir, ReportName(s))
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		prev := s.ReportFilePath
+		s.ReportFilePath = p
+		if err := writeReportFile(p, []byte(RenderReport(s, l)), s.own); err != nil {
+			s.ReportFilePath = prev
 			lastErr = err
 			continue
 		}
@@ -73,6 +85,47 @@ func WriteReport(s *Summary, l *Layout) (string, error) {
 		return p, nil
 	}
 	return "", fmt.Errorf("restore: could not write the report: %w", lastErr)
+}
+
+// writeReportFile writes the report beside its final name and renames it into
+// place, so that a failure part-way leaves the previous report (or none), never
+// a truncated one, and so that under a root run it is handed to the user before
+// it acquires its name.
+func writeReportFile(p string, body []byte, own *Ownership) error {
+	dir := filepath.Dir(p)
+	tmp, err := os.CreateTemp(dir, partialPrefix+"report-*"+partialSuffix)
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			tmp.Close()
+			os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(body); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := own.Apply(tmpName); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, p); err != nil {
+		return err
+	}
+	ok = true
+	syncDir(dir)
+	return nil
 }
 
 // RenderReport builds the text. It is a pure function of the summary so a test
@@ -216,6 +269,30 @@ func RenderReport(s *Summary, l *Layout) string {
 		rule()
 	}
 
+	if s.PreVerify != nil && len(s.PreVerify.Litter) > 0 {
+		// Named, because every file the program saw and did not act on is a
+		// discrepancy until somebody has been told about it. Not a problem:
+		// these are what Windows, a Mac or a Linux desktop leave in a folder
+		// somebody opened, and none of them was in the list of your files.
+		w("ON THE BACKUP DRIVE BUT NOT PART OF THE BACKUP")
+		w("")
+		verb := "are"
+		if len(s.PreVerify.Litter) == 1 {
+			verb = "is"
+		}
+		w("  %s beside your backup %s not in its list of files. These are the",
+			plural(len(s.PreVerify.Litter), "file", "files"), verb)
+		w("  kind of thing a computer leaves in any folder somebody opens (picture")
+		w("  thumbnails, folder settings), so they were not brought across and they")
+		w("  do not mean anything is wrong with your backup:")
+		w("")
+		for _, l := range s.PreVerify.Litter {
+			w("  %s", l)
+		}
+		w("")
+		rule()
+	}
+
 	w("DETAIL, FOR SOMEBODY WHO NEEDS IT")
 	w("")
 	if s.Archive != nil {
@@ -230,6 +307,16 @@ func RenderReport(s *Summary, l *Layout) string {
 	w("  finished           %s", s.FinishedAt.Format(time.RFC3339))
 	if s.NotifyAttempt != "" {
 		w("  desktop popup      %s", s.NotifyAttempt)
+	}
+	if s.ReportFilePath != "" {
+		w("  this note          %s", s.ReportFilePath)
+	}
+	if n := len(s.PartialsSwept); n > 0 {
+		w("  tidied up          %s left half-written by an earlier run that was", plural(n, "file", "files"))
+		w("                     interrupted, and removed before anything was copied:")
+		for _, p := range s.PartialsSwept {
+			w("                       %s", p)
+		}
 	}
 	w("")
 	w("  You can run the restore again safely. It checks every file that is")
@@ -251,11 +338,11 @@ func problems(s *Summary) []string {
 			"the backup drive itself did not check out: %d of %d files disagreed with the list. "+
 				"NOTHING WAS WRITTEN to this computer.",
 			len(s.PreVerify.Disagreements), s.PreVerify.ManifestCount))
-		if s.PreVerify.ManifestCount != s.PreVerify.DestinationCount {
+		if s.PreVerify.ManifestCount != s.PreVerify.Counted() {
 			out = append(out, fmt.Sprintf(
 				"the backup's list describes %d file(s) and the drive holds %d. Those are different "+
 					"numbers, so the drive is not the backup the list describes.",
-				s.PreVerify.ManifestCount, s.PreVerify.DestinationCount))
+				s.PreVerify.ManifestCount, s.PreVerify.Counted()))
 		}
 		// NAMED, not counted. "1 of 1 files disagreed" is a swallowed
 		// discrepancy wearing a number: the user cannot act on it, cannot
@@ -328,11 +415,19 @@ func plural(n int, one, many string) string {
 	return fmt.Sprintf("%d %s", n, many)
 }
 
-// renamedFiles lists every file that went in beside something else.
+// renamedFiles lists every file that is on this machine under a name other
+// than the one it had — whichever run put it there. Keyed on Result.Renamed,
+// never on the outcome: see Result.Renamed for the run-twice case that made
+// the outcome the wrong key.
 func renamedFiles(s *Summary) []string {
 	var out []string
 	for _, r := range s.Results {
-		if r.Outcome != OutPlacedAside {
+		if !r.Renamed {
+			continue
+		}
+		switch r.Outcome {
+		case OutWritten, OutAlreadyPresent, OutPlacedAside:
+		default:
 			continue
 		}
 		out = append(out, fmt.Sprintf("%s\n      is now: %s", r.Path, r.Final))

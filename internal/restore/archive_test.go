@@ -228,8 +228,14 @@ func TestFind_AnEmptyDirectoryIsNotAnArchive(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, manifest.MetaDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Asked for by path, so the refusal is the explicit one: the user named a
+	// folder and it is not a backup. It must not read as "nothing attached".
 	f := &Finder{Explicit: root}
-	if _, err := f.Find(); !errors.Is(err, ErrNoArchive) {
-		t.Fatalf("err = %v, want ErrNoArchive", err)
+	_, err := f.Find()
+	if !errors.Is(err, ErrExplicitArchiveMissing) {
+		t.Fatalf("err = %v, want ErrExplicitArchiveMissing", err)
+	}
+	if errors.Is(err, ErrNoArchive) {
+		t.Fatalf("an explicit path with no manifest also matches ErrNoArchive, so a caller would exit 0: %v", err)
 	}
 }

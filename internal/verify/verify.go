@@ -86,8 +86,24 @@ type Report struct {
 	Retried          int
 	BytesRead        int64
 	Disagreements    []Disagreement
-	StartedAt        time.Time
-	FinishedAt       time.Time
+	// Litter is every file at the destination that is NOT in the manifest and
+	// is something an operating system leaves in any folder a person opens:
+	// Thumbs.db, desktop.ini, a Mac's ._ files, a Linux desktop's .Trash-1000.
+	// Each is NAMED here and in Describe, and is not a disagreement. See
+	// isLitter for the list and for why it cannot hide a real file.
+	Litter     []string
+	StartedAt  time.Time
+	FinishedAt time.Time
+}
+
+// Counted is the number of files at the destination that count against the
+// manifest: everything that was found, less the named litter. The equality
+// Clean asks for is ManifestCount == Counted, and it is still exact.
+func (r *Report) Counted() int {
+	if r == nil {
+		return 0
+	}
+	return r.DestinationCount - len(r.Litter)
 }
 
 // Clean reports whether every file in the manifest was found at the destination
@@ -101,7 +117,7 @@ func (r *Report) Clean() bool {
 	return r != nil &&
 		r.ManifestCount > 0 &&
 		len(r.Disagreements) == 0 &&
-		r.ManifestCount == r.DestinationCount &&
+		r.ManifestCount == r.Counted() &&
 		r.Checked == r.ManifestCount
 }
 
@@ -114,6 +130,12 @@ func (r *Report) Describe() string {
 	if r.Retried > 0 {
 		fmt.Fprintf(&b, "        %d file(s) needed a second read\n", r.Retried)
 	}
+	if len(r.Litter) > 0 {
+		fmt.Fprintf(&b, "        %d file(s) beside the archive are not part of it and were not counted:\n", len(r.Litter))
+		for _, l := range r.Litter {
+			fmt.Fprintf(&b, "          %s\n", l)
+		}
+	}
 	if r.Clean() {
 		b.WriteString("        every file matched by count, size and SHA-256.\n")
 		return b.String()
@@ -122,8 +144,8 @@ func (r *Report) Describe() string {
 	for _, d := range r.Disagreements {
 		fmt.Fprintf(&b, "  %s\n", d)
 	}
-	if r.ManifestCount != r.DestinationCount {
-		fmt.Fprintf(&b, "  COUNT MISMATCH: manifest %d, destination %d\n", r.ManifestCount, r.DestinationCount)
+	if r.ManifestCount != r.Counted() {
+		fmt.Fprintf(&b, "  COUNT MISMATCH: manifest %d, destination %d\n", r.ManifestCount, r.Counted())
 	}
 	return b.String()
 }
@@ -224,10 +246,23 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	// is not harmless: it means the destination is not the archive we think it
 	// is, and a restore would either copy a stranger's file onto the new machine
 	// or silently ignore it. Either way the count no longer means anything.
+	//
+	// EXCEPT litter. A Thumbs.db that Windows Explorer dropped when somebody
+	// opened the folder is not evidence that the archive is somebody else's,
+	// and the first version treated it exactly as if it were: one thumbnail
+	// cache beside a perfect archive made the Linux restore refuse the whole
+	// run with "THE ARCHIVE IS DAMAGED", and told a school that its only copy
+	// was not the backup the list describes. Litter is named, not counted,
+	// and never quarantined. Everything else still is.
 	extras := make([]string, 0, len(found))
 	for stored := range found {
+		if isLitter(stored) {
+			rep.Litter = append(rep.Litter, stored)
+			continue
+		}
 		extras = append(extras, stored)
 	}
+	sort.Strings(rep.Litter)
 	sort.Strings(extras)
 	for _, stored := range extras {
 		extra := manifest.Entry{Path: stored, Stored: stored}
@@ -238,6 +273,58 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 
 	rep.FinishedAt = clock()
 	return rep, nil
+}
+
+// litterNames are files an operating system writes into a folder because a
+// person LOOKED at it. Compared case-insensitively on the last path segment.
+var litterNames = map[string]bool{
+	"thumbs.db":         true, // Windows Explorer thumbnail cache
+	"ehthumbs.db":       true, // Windows Media Center thumbnail cache
+	"ehthumbs_vista.db": true,
+	"desktop.ini":       true, // Windows folder view settings
+	".ds_store":         true, // macOS Finder view settings
+	".localized":        true, // macOS
+	".directory":        true, // KDE Dolphin folder view settings
+}
+
+// litterDirs are directories an operating system creates at the top of a
+// removable volume or in a folder it has been asked to delete from. Anything
+// inside one is litter. Compared case-insensitively on any path segment.
+var litterDirs = map[string]bool{
+	"$recycle.bin":              true, // Windows recycle bin on a removable drive
+	"system volume information": true, // Windows indexer / restore point metadata
+	".spotlight-v100":           true, // macOS Spotlight index
+	".fseventsd":                true, // macOS filesystem event log
+	".trashes":                  true, // macOS trash on a removable drive
+	".temporaryitems":           true, // macOS
+}
+
+// isLitter reports whether a file at the destination, WHICH THE MANIFEST DOES
+// NOT LIST, is operating-system noise rather than an unexplained file.
+//
+// It is only ever asked about files left over after every manifest entry has
+// been checked and removed from the scan, and that ordering is the whole
+// safety argument: a real Thumbs.db that was in the user's Pictures folder is
+// IN the manifest, is verified by size and hash like any other file, and never
+// reaches this function. Litter is not restored — the restore only ever writes
+// manifest entries — so calling a file litter can only change the COUNT, never
+// what lands on the user's machine.
+func isLitter(stored string) bool {
+	segs := strings.Split(stored, "/")
+	for _, seg := range segs[:len(segs)-1] {
+		low := strings.ToLower(seg)
+		if litterDirs[low] || strings.HasPrefix(low, ".trash-") {
+			// .Trash-<uid>: a Linux desktop's trash on a removable volume.
+			return true
+		}
+	}
+	last := segs[len(segs)-1]
+	if litterNames[strings.ToLower(last)] {
+		return true
+	}
+	// AppleDouble: "._report.txt" carries a Mac's resource fork for
+	// "report.txt". Always at least one character after the prefix.
+	return strings.HasPrefix(last, "._") && len(last) > 2
 }
 
 func recordQuarantine(q *quarantine.Set, d Disagreement) {

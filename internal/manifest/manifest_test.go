@@ -296,3 +296,15 @@ func TestCopyHashed_ReportsShortWrite(t *testing.T) {
 type shortWriter struct{}
 
 func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+// ArchiveSubdir is on sticks that already exist. The Windows half writes the
+// archive under it and the Linux half has to find it there, so a change to this
+// value is not a refactor: it is every stick made before the change becoming a
+// "no backup attached" on the machine that needs it. Pinned as a literal so the
+// person changing it has to change this line too, and read this.
+func TestArchiveSubdir_IsTheNameOnSticksInTheField(t *testing.T) {
+	if ArchiveSubdir != "auros-backup" {
+		t.Fatalf("ArchiveSubdir = %q. Sticks made by every earlier build carry \"auros-backup\"; "+
+			"the restore must keep finding those before this can change.", ArchiveSubdir)
+	}
+}

@@ -48,6 +48,15 @@ type Result struct {
 	Outcome Outcome
 	Final   string // where it actually ended up, for the file outcomes
 	Detail  string
+	// Renamed is true whenever Final is not the name the file had on Windows,
+	// WHICHEVER run put it there. It is a separate fact from Outcome on
+	// purpose: the first version derived "was this renamed" from
+	// Outcome == OutPlacedAside, so a second run — the documented recovery
+	// after any interruption, and what happens at every login until a run is
+	// clean — found its own earlier copy, reported OutAlreadyPresent, and the
+	// report stopped telling the user that the file under its own name is not
+	// theirs. The disclosure existed only on the run least likely to be read.
+	Renamed bool
 }
 
 // Summary is the whole run. It is what the desktop report is rendered from and
@@ -67,6 +76,14 @@ type Summary struct {
 	StoppedEarly   string // non-empty when the run stopped before finishing
 	NotifyAttempt  string
 	ReportFilePath string
+	// PartialsSwept names every leftover temporary file from an earlier run
+	// that was killed mid-write, removed before this run wrote anything.
+	PartialsSwept []string
+
+	// own is who the files this run created were handed to, so the report
+	// written afterwards is handed over the same way. nil when nothing needed
+	// handing over.
+	own *Ownership
 }
 
 // Clean is the single question the whole program exists to answer, and it is
@@ -91,6 +108,26 @@ func (s *Summary) Clean() bool {
 	}
 	if len(s.Results) != s.ManifestCount {
 		return false
+	}
+	// A problem in the Wi-Fi or printer handling makes the run unclean. The
+	// first version of this function never looked at the handler reports,
+	// although HandlerReport.Problems was documented as making the run
+	// not-clean: a refused keyfile, an unparseable profile, even "this build
+	// has no handler at all" produced "Your files are here", a calm popup, and
+	// a stamp that stopped the unit ever running again. The user deletes the
+	// archive after that.
+	//
+	// Skipped does NOT count, and that is a decision rather than an
+	// omission. A network the old machine knew but whose password was not in
+	// the backup is the ordinary case — it is named in the report as
+	// "NOT added — <why>" and there is nothing more the user can do about it
+	// here. Everything that went WRONG is a Problem, including every skip the
+	// handler could not explain; the handlers in this package add a Problem
+	// for each one.
+	for _, h := range []*HandlerReport{s.WiFi, s.Printers} {
+		if h != nil && len(h.Problems) > 0 {
+			return false
+		}
 	}
 	return true
 }
@@ -128,7 +165,23 @@ type Options struct {
 	// filesystem run out of room inside a unit test. SAFETY.md rule 8 — an
 	// option that could weaken a check never gets an exported off switch.
 	hookWriter func(path string, w io.Writer) io.Writer
+
+	// ownership, when non-nil, replaces the account the created files are
+	// handed to. UNEXPORTED, for the same reason as hookWriter: the production
+	// value is worked out inside Execute from the home directory and the
+	// effective uid, and an exported field here would be an off switch on the
+	// thing that stops a root run locking the user out of their own files.
+	// A test sets it so the handover can be watched on a machine that is not
+	// root.
+	ownership *Ownership
 }
+
+// ownerAware is implemented by the handlers in this package, so that a root
+// run hands over what THEY create in the home directory too (the staged
+// keyfiles, the printer plan). The method is unexported, so only types in this
+// package can implement it; a handler from elsewhere is responsible for its own
+// files.
+type ownerAware interface{ setOwner(*Ownership) }
 
 // Handler consumes the non-file parts of an archive.
 type Handler interface {
@@ -142,10 +195,13 @@ type HandlerReport struct {
 	Title string
 	// Lines are shown to the user verbatim, one per profile or printer.
 	Lines []string
-	// Done and Skipped must sum to the number of items handled.
+	// Done and Skipped must sum to the number of items handled. Skipped is an
+	// EXPECTED outcome that the user is told about in Lines (a network with no
+	// saved password); it does not make the run unclean. See Summary.Clean.
 	Done, Skipped int
 	// Problems is non-empty when something went wrong. A non-empty Problems
-	// makes the whole run not-clean.
+	// makes the whole run not-clean — enforced in Summary.Clean and pinned by
+	// TestSummary_AWiFiProblemMakesTheRunUnclean.
 	Problems []string
 }
 
@@ -198,17 +254,57 @@ func Execute(ctx context.Context, p *Plan, o Options) (*Summary, error) {
 			pre.Describe())
 	}
 
+	// ---- WHOSE FILES THESE ARE ----
+	//
+	// Decided before the first write, because a root run that cannot tell who
+	// owns the home must not write into it at all: every file would land
+	// owned by root, and the check afterwards would pass because root can read
+	// everything back.
+	own := o.ownership
+	if own == nil {
+		var oerr error
+		own, oerr = ownershipFor(p.Layout.Home, os.Geteuid())
+		if oerr != nil {
+			s.FinishedAt = now()
+			s.StoppedEarly = oerr.Error()
+			return s, oerr
+		}
+	}
+	s.own = own
+
+	// ---- SWEEP ----
+	//
+	// A temporary file from a run that was SIGKILLed, OOM-killed or had its
+	// power cut: the defer in writeAtomic that removes it never ran. It is
+	// debris, not data — its bytes never matched the manifest or it would have
+	// been renamed — and leaving it means one more stray file in the user's
+	// own Documents folder per interruption, forever. Swept BEFORE the first
+	// write so the sweep can never race a temporary file this run is writing.
+	if !o.DryRun {
+		s.PartialsSwept = sweepPartials(p)
+	}
+
 	// ---- WRITE ----
 	total := p.Count()
 	done := 0
 	buf := make([]byte, bufSize)
+
+	// reserved is every name some entry is going to be written under. An aside
+	// name ("notes (from Windows).txt") is chosen at write time, so without
+	// this it can land on another entry's REAL name — and when the two have the
+	// same bytes, the second is "already present" at the first one's file and
+	// one of the user's files ends up existing nowhere.
+	reserved := make(map[string]bool, len(p.Files))
+	for _, it := range p.Files {
+		reserved[filepath.Clean(it.Route.Target)] = true
+	}
 
 	for _, it := range p.Files {
 		if cerr := ctx.Err(); cerr != nil {
 			s.StoppedEarly = "interrupted: " + cerr.Error()
 			break
 		}
-		res := placeOne(ctx, it, o.DryRun, buf, o.hookWriter)
+		res := placeOne(ctx, it, p.Layout, own, reserved, o.DryRun, buf, o.hookWriter)
 		s.add(res)
 		done++
 		if o.Progress != nil {
@@ -233,6 +329,11 @@ func Execute(ctx context.Context, p *Plan, o Options) (*Summary, error) {
 	}
 
 	if s.StoppedEarly == "" {
+		for _, h := range []Handler{o.WiFiSink, o.PrinterSink} {
+			if oa, ok := h.(ownerAware); ok {
+				oa.setOwner(own)
+			}
+		}
 		s.WiFi = runHandler(ctx, o.WiFiSink, p.WiFi, "Wi-Fi networks")
 		s.Printers = runHandler(ctx, o.PrinterSink, p.Printers, "Printers")
 		for _, it := range p.WiFi {
@@ -290,12 +391,22 @@ const noSpaceMarker = "the disk is full"
 
 // placeOne writes a single file, and every branch it can take is an outcome the
 // user is shown.
-func placeOne(ctx context.Context, it *Item, dryRun bool, buf []byte, hook func(string, io.Writer) io.Writer) Result {
+func placeOne(ctx context.Context, it *Item, l *Layout, own *Ownership, reserved map[string]bool, dryRun bool, buf []byte, hook func(string, io.Writer) io.Writer) Result {
 	e := it.Entry
 	base := Result{Path: e.Path, Bucket: it.Route.Bucket}
 
 	target := it.Route.Target
 	for n := 0; ; n++ {
+		if target != it.Route.Target && reserved[filepath.Clean(target)] {
+			// Another entry's own name. Occupied, whatever is on disk there
+			// right now, and whatever bytes it holds.
+			if n > 1000 {
+				base.Outcome, base.Final, base.Detail = OutFailed, target, "too many files already occupy this name"
+				return base
+			}
+			target = aside(it.Route.Target, n)
+			continue
+		}
 		st, err := os.Lstat(target)
 		switch {
 		case os.IsNotExist(err):
@@ -312,8 +423,13 @@ func placeOne(ctx context.Context, it *Item, dryRun bool, buf []byte, hook func(
 				sum, _, herr := manifest.HashFile(ctx, target, sha256.New(), buf)
 				if herr == nil && sum == e.SHA256 {
 					base.Outcome, base.Final = OutAlreadyPresent, target
-					if n > 0 {
-						base.Detail = "restored beside an existing file by an earlier run"
+					if target != it.Route.Target {
+						// An earlier run put it beside somebody else's file.
+						// That is STILL a rename the user has to be told
+						// about: the file under its own name is not theirs.
+						base.Renamed = true
+						base.Detail = "something was already called " + filepath.Base(it.Route.Target) +
+							"; yours is " + filepath.Base(target) + " (put there by an earlier run)"
 					}
 					return base
 				}
@@ -340,28 +456,95 @@ func placeOne(ctx context.Context, it *Item, dryRun bool, buf []byte, hook func(
 		}
 		break
 	}
+	base.Renamed = target != it.Route.Target
 
 	if dryRun {
 		base.Outcome, base.Final, base.Detail = OutWritten, target, "dry run: not actually written"
 		return base
 	}
 
-	if err := os.MkdirAll(filepath.Dir(target), os.FileMode(it.Route.DirMode)); err != nil {
+	dir := filepath.Dir(target)
+	// The plan checked every target with its links resolved. That was then;
+	// this is now, and a directory can have been swapped for a link since.
+	// So the check is made twice more, the way internal/safety/destination.go
+	// does it on the Windows side: once on the deepest part of the path that
+	// exists BEFORE anything is created (so MkdirAll cannot be led outside the
+	// home), and once on the whole directory AFTER it exists, immediately
+	// before the temporary file is created inside it.
+	if err := insideHome(dir, l); err != nil {
+		base.Outcome, base.Final, base.Detail = OutFailed, target, err.Error()
+		return base
+	}
+	if err := mkdirAllOwned(dir, os.FileMode(it.Route.DirMode), own); err != nil {
 		base.Outcome, base.Final, base.Detail = OutFailed, target, describeWriteErr(err)
 		return base
 	}
-	if err := writeAtomic(ctx, it.Source, target, e, os.FileMode(it.Route.FileMode), buf, hook); err != nil {
+	if err := insideHome(dir, l); err != nil {
+		base.Outcome, base.Final, base.Detail = OutFailed, target, err.Error()
+		return base
+	}
+	if err := writeAtomic(ctx, it.Source, target, e, os.FileMode(it.Route.FileMode), own, buf, hook); err != nil {
 		base.Outcome, base.Final, base.Detail = OutFailed, target, describeWriteErr(err)
 		return base
 	}
 	base.Final = target
-	if target != it.Route.Target {
+	if base.Renamed {
 		base.Outcome = OutPlacedAside
 		base.Detail = "something was already called " + filepath.Base(it.Route.Target) + "; yours is " + filepath.Base(target)
 		return base
 	}
 	base.Outcome = OutWritten
 	return base
+}
+
+// insideHome resolves every link in dir that exists and refuses unless the
+// result is inside the home directory, itself resolved. Both sides are
+// resolved: Fedora Atomic ships /home as a link to /var/home, so comparing a
+// resolved directory against an unresolved home would refuse every machine we
+// sell, and comparing two unresolved paths is the lexical check that let a
+// linked ~/Documents carry a payroll file out of the home.
+func insideHome(dir string, l *Layout) error {
+	real, err := resolveDeep(dir)
+	if err != nil {
+		return fmt.Errorf("cannot resolve %s: %v", dir, err)
+	}
+	if !underPath(real, l.realHome) {
+		return fmt.Errorf("%w: %s really is %s, which is not inside %s",
+			ErrPathEscape, dir, real, l.realHome)
+	}
+	return nil
+}
+
+// mkdirAllOwned is os.MkdirAll that also hands every directory it CREATED to
+// own. Directories that already existed are not touched: they belong to
+// whoever made them, and a restore that re-owned ~/Documents would be making a
+// decision that is not its to make.
+func mkdirAllOwned(dir string, mode os.FileMode, own *Ownership) error {
+	var created []string
+	if own != nil {
+		for p := dir; ; {
+			if _, err := os.Lstat(p); err == nil {
+				break
+			}
+			created = append(created, p)
+			parent := filepath.Dir(p)
+			if parent == p {
+				break
+			}
+			p = parent
+		}
+	}
+	if err := os.MkdirAll(dir, mode); err != nil {
+		return err
+	}
+	// Outermost first, so a directory is never owned by the user while its
+	// parent is still root's.
+	for i := len(created) - 1; i >= 0; i-- {
+		if err := own.Apply(created[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func describeWriteErr(err error) string {
@@ -383,14 +566,61 @@ func aside(p string, n int) string {
 	return filepath.Join(dir, fmt.Sprintf("%s (from Windows %d)%s", stem, n+1, ext))
 }
 
+// partialPrefix and partialSuffix name the temporary file writeAtomic creates.
+// One definition, used by both the writer and the sweep, so the sweep cannot
+// drift into looking for a name the writer no longer uses.
+const (
+	partialPrefix = ".auros-restore-"
+	partialSuffix = ".part"
+)
+
+func isPartial(name string) bool {
+	return strings.HasPrefix(name, partialPrefix) && strings.HasSuffix(name, partialSuffix) &&
+		len(name) > len(partialPrefix)+len(partialSuffix)
+}
+
+// sweepPartials removes temporary files left by an earlier run that was killed
+// mid-write. It looks ONLY in the directories this plan will write into, and
+// only at their immediate entries: it has no business walking the rest of
+// somebody's home directory, and a name matching the pattern anywhere else is
+// not ours to delete. It removes regular files only.
+func sweepPartials(p *Plan) []string {
+	dirs := map[string]bool{}
+	for _, it := range p.Files {
+		dirs[filepath.Dir(it.Route.Target)] = true
+	}
+	var removed []string
+	for dir := range dirs {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			continue // not created yet: nothing to sweep
+		}
+		for _, e := range ents {
+			if !e.Type().IsRegular() || !isPartial(e.Name()) {
+				continue
+			}
+			full := filepath.Join(dir, e.Name())
+			if os.Remove(full) == nil {
+				removed = append(removed, full)
+			}
+		}
+	}
+	sort.Strings(removed)
+	return removed
+}
+
 // writeAtomic streams one file from the archive into place.
 //
 // The bytes are hashed AS THEY ARE WRITTEN and compared against the manifest
 // BEFORE the rename. A file whose digest does not match never acquires its real
 // name, so an interrupted or corrupted write cannot leave a plausible-looking
 // wrong file in somebody's Documents folder. The temporary file is removed on
-// every failure path.
-func writeAtomic(ctx context.Context, src, dst string, e manifest.Entry, mode os.FileMode, buf []byte, hook func(string, io.Writer) io.Writer) error {
+// every failure path that returns; the ones that do not (a power cut) are
+// swept by the next run.
+//
+// When own is set, the temporary file is handed over BEFORE the rename, so the
+// file is never — not for an instant — under its real name and owned by root.
+func writeAtomic(ctx context.Context, src, dst string, e manifest.Entry, mode os.FileMode, own *Ownership, buf []byte, hook func(string, io.Writer) io.Writer) error {
 	dir := filepath.Dir(dst)
 	in, err := os.Open(src)
 	if err != nil {
@@ -398,7 +628,7 @@ func writeAtomic(ctx context.Context, src, dst string, e manifest.Entry, mode os
 	}
 	defer in.Close()
 
-	tmp, err := os.CreateTemp(dir, ".auros-restore-*.part")
+	tmp, err := os.CreateTemp(dir, partialPrefix+"*"+partialSuffix)
 	if err != nil {
 		return err
 	}
@@ -432,6 +662,9 @@ func writeAtomic(ctx context.Context, src, dst string, e manifest.Entry, mode os
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := own.Apply(tmpName); err != nil {
 		return err
 	}
 	if e.ModTimeUnixNano != 0 {
@@ -518,6 +751,16 @@ func reVerify(ctx context.Context, results []Result, p *Plan, dryRun bool, buf [
 		byPath[it.Entry.Path] = it
 	}
 
+	// claimed maps each file on disk to the entry that says it is that file.
+	// Two entries claiming ONE file is the count-right-bytes-wrong failure:
+	// both hashes match because it is the same file hashed twice, the count
+	// is right because both entries were "restored", and one of the two
+	// files the user had does not exist anywhere. Plan-time collision checks
+	// cannot see it, because it arises at write time (an aside name landing on
+	// another entry's real name), so it is checked here on the results — which
+	// also catches any future routing rule that collides the same way.
+	claimed := make(map[string]string, len(results))
+
 	for _, res := range results {
 		rep.Accounted++
 		switch res.Outcome {
@@ -526,6 +769,15 @@ func reVerify(ctx context.Context, results []Result, p *Plan, dryRun bool, buf [
 		default:
 			continue
 		}
+		key := filepath.Clean(res.Final)
+		if prev, dup := claimed[key]; dup {
+			rep.Disagreements = append(rep.Disagreements, fmt.Sprintf(
+				"%s: reported as restored to %s, which is the file %s was restored to — two entries, "+
+					"one file on disk, so one of them is not on this computer",
+				res.Path, res.Final, prev))
+			continue
+		}
+		claimed[key] = res.Path
 		if dryRun {
 			continue
 		}
