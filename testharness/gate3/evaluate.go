@@ -20,26 +20,9 @@ const MaxOvershootBytes int64 = 16 << 20
 // run owes and never omits one: a check that did not run is a check that failed,
 // and Recompute enforces that from the other side.
 func (r *Result) Evaluate(sc *Scenario, expectedFiles int) {
-	// ── C1: the invariant (D27). Nothing was written to the system disk. ──
-	sys := r.SystemDisk
-	switch {
-	case r.Settle != nil && r.Settle.Why() != "":
-		r.Add(CheckSystemDisk, false, "%s", r.Settle.Why())
-	case sys == nil:
-		r.Add(CheckSystemDisk, false, "the system disk was never measured")
-	case sys.Error != "":
-		r.Add(CheckSystemDisk, false, "the system disk could not be measured: %s", sys.Error)
-	case sys.Wrapped:
-		r.Add(CheckSystemDisk, false,
-			"the change journal wrapped during the run, so the window cannot be accounted for")
-	case len(sys.Unexplained) > 0:
-		r.Add(CheckSystemDisk, false, "%d change(s) to C: that the noise list does not explain, first: %s",
-			len(sys.Unexplained), sys.Unexplained[0])
-	default:
-		r.Add(CheckSystemDisk, true, "%d change-journal records examined between USN %d and %d; "+
-			"%d matched the published noise list; nothing else touched C:",
-			sys.Records, sys.StartUSN, sys.EndUSN, sys.Excluded)
-	}
+	// ── C1: the invariant (D27, by enforcement). The installer wrote nothing to C:. ──
+	ok, detail := SystemDiskVerdict(r.Enforcement, r.InstallerWrites)
+	r.Add(CheckSystemDisk, ok, "%s", detail)
 
 	// ── C2: the user's own files are byte-identical afterwards. ──
 	if r.Source == nil {
@@ -127,9 +110,9 @@ func (r *Result) Evaluate(sc *Scenario, expectedFiles int) {
 	default:
 		// The run log cannot carry a wall crossing (see Claims.ArmPlanPrinted),
 		// so this check leans on what the installer printed AND on C1, which is
-		// the measurement: the system disk did not change.
-		r.Add(CheckWallNotCrossed, true, "the installer performed no arm step, and the change journal "+
-			"agrees that nothing on C: moved (%d run-log events)", r.Claims.Events)
+		// the measurement: the installer wrote nothing to C:.
+		r.Add(CheckWallNotCrossed, true, "the installer performed no arm step; C1 is the measurement "+
+			"of whether it wrote to C: (%d run-log events)", r.Claims.Events)
 	}
 
 	// ── C7: on a run that claims success, everything is actually there. ──

@@ -33,20 +33,17 @@ type RunConfig struct {
 	Seed     uint64
 	Faithful bool
 	Image    string
-
-	// SettleQuiet and SettleMax bound the settle phase; zero means the default.
-	SettleQuiet time.Duration
-	SettleMax   time.Duration
 }
 
 // RunOnce performs one run end to end and returns its evidence.
 //
 // The order is the whole design:
 //
-//	mark the change journal → run the installer as the migration user →
-//	fire the scenario at its pin, measured from outside the process →
-//	read the journal back → re-hash the source → re-hash the archive →
-//	read what the installer claimed → decide
+//	deny the migration user every write to C: → start the trace →
+//	run the installer as that user → fire the scenario at its pin, measured
+//	from outside the process → read the trace and lift the deny →
+//	re-hash the source → re-hash the archive → read what the installer
+//	claimed → decide
 //
 // Every measurement after the run is made by this program from raw bytes. The
 // installer's own account of itself is read last and only ever used to catch it
@@ -93,13 +90,9 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 		return nil, err
 	}
 
-	// ── log the migration user on BEFORE settling ────────────────────────────
-	// A logon and profile load wake Windows' own per-user machinery (the Entra
-	// broker rewrites AppRepository\...\ActivationStore.dat). When this happened
-	// after the "before" mark, every clean run showed those writes as unexplained
-	// C: changes (runs 35632029937, 35596591968). The logon is harness setup, not
-	// the installer, so its side effects belong in the settle window, and only the
-	// installer runs between the marks.
+	// ── log the migration user on first ───────────────────────────────────────
+	// A logon and profile load wake Windows' own per-user machinery; that is
+	// harness setup, not the installer, and it happens before the deny ACE.
 	sess, err := LogonMigrationUser(cfg.User, cfg.Password)
 	if err != nil {
 		return nil, err
@@ -110,24 +103,13 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	defer sess.Close()
 	res.Elevated = sess.Elevated
 
-	// ── settle: C: must go quiet before the "before" mark is taken ──────────
-	// Done before the harness itself touches C: (destination prep, planted
-	// links), so the only writers it waits out are the machine's own. A machine
-	// that never settles is not measured: C1 fails with why, and nothing runs.
-	quiet, maxWait := cfg.SettleQuiet, cfg.SettleMax
-	if quiet <= 0 {
-		quiet = DefaultSettleQuiet
-	}
-	if maxWait <= 0 {
-		maxWait = DefaultSettleMax
-	}
-	poll, perr := journalPoller("C:")
-	if perr != nil {
-		res.Settle = &SettleReport{QuietSeconds: quiet.Seconds(), Error: perr.Error()}
-	} else {
-		res.Settle = Settle(poll, quiet, maxWait, SettleEvery, time.Now, time.Sleep)
-	}
-	if res.Settle.Why() != "" {
+	// ── C1: deny the account every write to C: for the length of the run ────
+	// Applied after the logon (a logon writes the profile, which is exempt
+	// anyway) and before anything is measured. Removed after the run, always.
+	enf := ApplyEnforcement(sess, cfg.User, cfg.WorkDir)
+	res.Enforcement = enf
+	defer enf.Remove()
+	if enf.Why() != "" {
 		res.Evaluate(sc, len(g.ByGolden))
 		return res, nil
 	}
@@ -195,7 +177,7 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 		res.Pin = &pin
 	}
 
-	// ── the invariant's opening mark, and the trace that attributes it ───────
+	// ── the trace C1 reads, and the change journal's opening mark (a report) ──
 	trace, terr := StartTrace(filepath.Join(cfg.WorkDir, "etw-"+cfg.RunID))
 	if terr == nil {
 		defer trace.Stop()
@@ -255,11 +237,13 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	time.Sleep(3 * time.Second)
 	in.Release()
 
-	if merr == nil {
-		attr := &Attribution{Err: fmt.Sprintf("the trace did not start: %v", terr)}
-		if terr == nil {
-			attr = trace.Attribute([]uint32{proc.PID()})
-		}
+	attr := &Attribution{Err: fmt.Sprintf("the trace did not start: %v", terr)}
+	if terr == nil {
+		attr = trace.Attribute([]uint32{proc.PID()})
+	}
+	res.InstallerWrites = attr.AuditWrites(enf.Exemptions)
+	enf.Remove()
+	if merr == nil { // the change-journal diff: a report line, never a verdict
 		rep, derr := DiffUSN(mark, injectedPaths(devs, cfg), attr)
 		if derr != nil && rep == nil {
 			rep = &SystemDiskReport{Error: derr.Error()}
@@ -313,27 +297,6 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	res.Findings = append(res.Findings, fidelityFindings(g, res)...)
 	res.Evaluate(sc, len(g.ByGolden))
 	return res, nil
-}
-
-// journalPoller returns a poll for Settle: each call reads the C: change
-// journal since the previous call and returns the changes the noise list does
-// not excuse. No attribution: while settling, every such change counts.
-func journalPoller(letter string) (func() ([]string, error), error) {
-	mark, err := MarkUSN(letter)
-	if err != nil {
-		return nil, err
-	}
-	return func() ([]string, error) {
-		rep, err := DiffUSN(mark, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		if rep.Error != "" {
-			return nil, fmt.Errorf("%s", rep.Error)
-		}
-		mark.NextUSN = rep.EndUSN
-		return rep.Unexplained, nil
-	}, nil
 }
 
 // installerArgs is the REAL command line, from cmd/auros-migrate/main.go.

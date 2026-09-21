@@ -97,14 +97,17 @@ type Result struct {
 	Fire       *FireRecord `json:"fire,omitempty"`
 	Deviations []Deviation `json:"deviations,omitempty"`
 
-	Settle     *SettleReport     `json:"settle,omitempty"`
-	SystemDisk *SystemDiskReport `json:"system_disk,omitempty"`
-	Source     *TreeReport       `json:"source,omitempty"`
-	Archive    *TreeReport       `json:"archive,omitempty"`
-	Claims     *Claims           `json:"installer_claims,omitempty"`
-	Manifest   *ManifestFile     `json:"installer_manifest,omitempty"`
-	Quarantine *QuarantineReport `json:"installer_quarantine,omitempty"`
-	Inventory  map[string]string `json:"installer_inventory,omitempty"`
+	// Enforcement and InstallerWrites are C1. SystemDisk, the change-journal
+	// diff, is a report only and never gates (owner decision 2026-09-21).
+	Enforcement     *Enforcement      `json:"enforcement,omitempty"`
+	InstallerWrites *WriteAudit       `json:"installer_c_writes,omitempty"`
+	SystemDisk      *SystemDiskReport `json:"system_disk_report_only,omitempty"`
+	Source          *TreeReport       `json:"source,omitempty"`
+	Archive         *TreeReport       `json:"archive,omitempty"`
+	Claims          *Claims           `json:"installer_claims,omitempty"`
+	Manifest        *ManifestFile     `json:"installer_manifest,omitempty"`
+	Quarantine      *QuarantineReport `json:"installer_quarantine,omitempty"`
+	Inventory       map[string]string `json:"installer_inventory,omitempty"`
 
 	// Findings are things the harness measured that are not part of the §6C
 	// exit condition but that a reader must be told: alternate data streams
@@ -195,19 +198,6 @@ func (s *SystemDiskReport) TopDirs() []string {
 		return nil
 	}
 	return s.topDirs
-}
-
-// OK reports whether the invariant held. It fails closed: an error, a wrapped
-// journal or any unexplained change is a failure.
-func (s *SystemDiskReport) OK() bool {
-	return s != nil && s.Error == "" && !s.Wrapped && len(s.Unexplained) == 0 && s.Records >= 0
-}
-
-// ReaderMissedRecords reports a window in which the journal advanced and the
-// reader returned nothing: the journal is not being read. A window in which the
-// journal did NOT advance is a quiet machine, and zero records is the truth.
-func (s *SystemDiskReport) ReaderMissedRecords() bool {
-	return s.Records == 0 && s.EndUSN > s.StartUSN
 }
 
 // RequiredChecks is the list of check IDs a run of this shape owes. A result
@@ -303,18 +293,30 @@ func (r *Result) Summary(required []string) string {
 		fmt.Fprintf(&b, "   archive  : %d present, %d hashed OK, %d corrupted, %d extra, %d partial\n",
 			r.Archive.Present, r.Archive.HashMatches, len(r.Archive.Corrupt), len(r.Archive.Extra), len(r.Archive.Partials))
 	}
-	if r.Settle != nil {
-		fmt.Fprintf(&b, "   settle   : settled=%v after %.0fs (%d polls, %.0fs quiet required)\n",
-			r.Settle.Settled, r.Settle.Seconds, r.Settle.Polls, r.Settle.QuietSeconds)
-		for _, u := range r.Settle.StillChanging {
-			fmt.Fprintf(&b, "              ~ %s\n", u)
+	if e := r.Enforcement; e != nil {
+		fmt.Fprintf(&b, "   deny ACE : %s on %s (applied %v in %.0fs, verified %v, removed %v in %.0fs), exempt: %s\n",
+			orNone(e.ACE), e.Path, e.Applied, e.ApplySec, e.Verified, e.Removed, e.RemoveSec,
+			strings.Join(e.Exemptions, ", "))
+		for _, p := range e.Probes {
+			fmt.Fprintf(&b, "              probe: %s\n", p)
+		}
+	}
+	if w := r.InstallerWrites; w != nil {
+		for _, l := range w.Denied {
+			fmt.Fprintf(&b, "              DENIED %s\n", l)
+		}
+		for _, l := range w.Writes {
+			fmt.Fprintf(&b, "              WROTE  %s\n", l)
+		}
+		for _, l := range w.Exempt {
+			fmt.Fprintf(&b, "              exempt %s\n", l)
 		}
 	}
 	if r.SystemDisk != nil {
 		for _, d := range r.SystemDisk.TopDirs() {
 			fmt.Fprintf(&b, "   churn    : %s\n", d)
 		}
-		fmt.Fprintf(&b, "   C:       : %d change-journal records examined, %d matched the noise list, %d background, %d unexplained\n",
+		fmt.Fprintf(&b, "   C: (report only, not a verdict): %d change-journal records examined, %d matched the noise list, %d background, %d unexplained\n",
 			r.SystemDisk.Records, r.SystemDisk.Excluded, len(r.SystemDisk.Background), len(r.SystemDisk.Unexplained))
 		fmt.Fprintf(&b, "   attrib.  : %s\n", r.SystemDisk.Attribution)
 		for _, u := range r.SystemDisk.Background {

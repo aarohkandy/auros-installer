@@ -340,6 +340,9 @@ func newResultForTest(kind Kind) *Result {
 		Source:     &TreeReport{Tree: "source", Expected: 9, HashMatches: 9},
 		Archive:    &TreeReport{Tree: "archive", Expected: 9, Present: 9, HashMatches: 9},
 		SystemDisk: &SystemDiskReport{Records: 12, Excluded: 12},
+		Enforcement: &Enforcement{Path: `C:\`, ACE: "(D;OICI;0x00010156;;;S-1-5-21-1)", Applied: true,
+			Verified: true, Removed: true, Exemptions: []string{`C:\Users\auros-gate3`}},
+		InstallerWrites: &WriteAudit{Events: 40},
 		Claims: &Claims{ClaimedVerified: true, VerifiedCount: 9, ReachedWall: true, Events: 30,
 			ArmPlanPrinted: true, SawPhaseEvents: true},
 		Inventory:  fullInventory(),
@@ -383,24 +386,41 @@ func TestVerdictFailsWhenTheFaultNeverFired(t *testing.T) {
 }
 
 func TestVerdictFailsWhenTheSystemDiskWasWrittenTo(t *testing.T) {
-	r := newResultForTest(KindClean)
-	r.Manifest = goodManifest()
-	r.manifestGolden = &Golden{}
-	r.SystemDisk.Unexplained = []string{`C:\ProgramData\auros\scratch.tmp [file-create]`}
-	r.Evaluate(nil, 9)
-	if v, _ := r.Recompute(RequiredChecks(KindClean, nil)); v == Pass {
-		t.Fatal("a run that wrote to the system disk was scored as a pass")
+	for name, mut := range map[string]func(r *Result){
+		"a write": func(r *Result) {
+			r.InstallerWrites.Writes = []string{`C:\ProgramData\auros\scratch.tmp — create by auros-migrate.exe(200)`}
+		},
+		"a refused attempt": func(r *Result) {
+			r.InstallerWrites.Denied = []string{`C:\auros\x — create refused by auros-migrate.exe(200)`}
+		},
+		"an unreadable trace": func(r *Result) { r.InstallerWrites.Error = "the trace could not be read" },
+		"no trace":            func(r *Result) { r.InstallerWrites = nil },
+		"no ACE":              func(r *Result) { r.Enforcement = nil },
+		"an unverified ACE":   func(r *Result) { r.Enforcement.Verified = false },
+		"an ACE left behind":  func(r *Result) { r.Enforcement.RemoveError = "icacls failed" },
+	} {
+		r := newResultForTest(KindClean)
+		r.Manifest = goodManifest()
+		r.manifestGolden = &Golden{}
+		mut(r)
+		r.Evaluate(nil, 9)
+		if v, _ := r.Recompute(RequiredChecks(KindClean, nil)); v == Pass {
+			t.Errorf("%s: scored as a pass", name)
+		}
 	}
 }
 
-func TestVerdictFailsWhenTheChangeJournalWrapped(t *testing.T) {
+// The owner chose enforcement only: the change journal is a report line.
+func TestTheChangeJournalNoLongerGates(t *testing.T) {
 	r := newResultForTest(KindClean)
 	r.Manifest = goodManifest()
 	r.manifestGolden = &Golden{}
 	r.SystemDisk.Wrapped = true
+	r.SystemDisk.Unexplained = []string{`C:\Windows\System32\SecurityHealth\x [file-create]`}
+	r.InstallerWrites.Exempt = []string{`C:\Users\auros-gate3\AppData\Local\Temp\x — create by auros-migrate.exe(200)`}
 	r.Evaluate(nil, 9)
-	if v, _ := r.Recompute(RequiredChecks(KindClean, nil)); v == Pass {
-		t.Fatal("a run whose window could not be accounted for was scored as a pass")
+	if v, why := r.Recompute(RequiredChecks(KindClean, nil)); v != Pass {
+		t.Fatalf("background churn on C: or a write inside the exemption failed a clean run: %v", why)
 	}
 }
 
@@ -631,25 +651,6 @@ func TestInventoryLinesReadTheFoldersTheInstallerSaysItLookedAt(t *testing.T) {
 	}
 	if len(inv) != 3 {
 		t.Fatalf("expected three folders, got %d: %v", len(inv), inv)
-	}
-}
-
-// ── prove-red's idle window ──────────────────────────────────────────────────
-
-func TestIdleWindowIsOnlyABrokenReaderWhenTheJournalMoved(t *testing.T) {
-	// Measured on run 35562498238: a genuinely quiet two seconds, USN start ==
-	// end, zero records. That is a quiet machine, not a broken reader.
-	quiet := &SystemDiskReport{StartUSN: 3534445720, EndUSN: 3534445720}
-	if quiet.ReaderMissedRecords() {
-		t.Error("a window in which the journal did not advance was called a broken reader")
-	}
-	moved := &SystemDiskReport{StartUSN: 100, EndUSN: 4096}
-	if !moved.ReaderMissedRecords() {
-		t.Error("the journal advanced and the reader returned nothing, and that was not flagged")
-	}
-	read := &SystemDiskReport{StartUSN: 100, EndUSN: 4096, Records: 3}
-	if read.ReaderMissedRecords() {
-		t.Error("a window whose records were read was called a broken reader")
 	}
 }
 
