@@ -337,11 +337,10 @@ func TestArchiveCheckRefusesATornFileThatNeverExisted(t *testing.T) {
 func newResultForTest(kind Kind) *Result {
 	return &Result{
 		Harness: HarnessVersion, RunID: "t", Kind: kind,
-		Source:     &TreeReport{Tree: "source", Expected: 9, HashMatches: 9},
-		Archive:    &TreeReport{Tree: "archive", Expected: 9, Present: 9, HashMatches: 9},
-		SystemDisk: &SystemDiskReport{Records: 12, Excluded: 12},
-		Enforcement: &Enforcement{Path: `C:\`, ACE: "(D;OICI;0x00010156;;;S-1-5-21-1)", Applied: true,
-			Verified: true, Removed: true, Exemptions: []string{`C:\Users\auros-gate3`}},
+		Source:          &TreeReport{Tree: "source", Expected: 9, HashMatches: 9},
+		Archive:         &TreeReport{Tree: "archive", Expected: 9, Present: 9, HashMatches: 9},
+		SystemDisk:      &SystemDiskReport{Records: 12, Excluded: 12},
+		Enforcement:     &Enforcement{Integrity: LowIntegritySID, Verified: true, Exemptions: []string{`C:\Users\auros-gate3`}},
 		InstallerWrites: &WriteAudit{Events: 40},
 		Claims: &Claims{ClaimedVerified: true, VerifiedCount: 9, ReachedWall: true, Events: 30,
 			ArmPlanPrinted: true, SawPhaseEvents: true},
@@ -395,9 +394,9 @@ func TestVerdictFailsWhenTheSystemDiskWasWrittenTo(t *testing.T) {
 		},
 		"an unreadable trace": func(r *Result) { r.InstallerWrites.Error = "the trace could not be read" },
 		"no trace":            func(r *Result) { r.InstallerWrites = nil },
-		"no ACE":              func(r *Result) { r.Enforcement = nil },
-		"an unverified ACE":   func(r *Result) { r.Enforcement.Verified = false },
-		"an ACE left behind":  func(r *Result) { r.Enforcement.RemoveError = "icacls failed" },
+		"no enforcement":      func(r *Result) { r.Enforcement = nil },
+		"unverified":          func(r *Result) { r.Enforcement.Verified = false },
+		"a failed probe":      func(r *Result) { r.Enforcement.Error = "md C:\\Windows\\Temp\\x at Low: created true" },
 	} {
 		r := newResultForTest(KindClean)
 		r.Manifest = goodManifest()

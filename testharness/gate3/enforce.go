@@ -14,84 +14,52 @@ import (
 // the Entra broker) writes C: on a shared runner whatever the installer does,
 // so the diff never converged. It is proved the other way round:
 //
-//  1. Before each run the migration account is DENIED every write-class right
-//     on C:\, inherited by everything under it, except its own profile
-//     directory. Windows now refuses the installer any write there.
+//  1. The installer's process tree runs at LOW mandatory integrity. Windows
+//     treats an object with no integrity label as Medium, and the default
+//     policy is NO_WRITE_UP: a Low process is refused write access to it before
+//     its DACL is even consulted (learn.microsoft.com/windows/win32/secauthz/
+//     mandatory-integrity-control). Nothing is written to C:'s ACLs, so there is
+//     no propagation and no protected DACL (C:\ProgramData, C:\Windows, …) to
+//     escape it — the first design, a deny ACE on C:\, measured 282 s to apply
+//     and never reached C:\ProgramData (run 35656850124). Reading is untouched:
+//     NO_READ_UP is not the default for files. Only the harness's own
+//     destination volumes and work directory are labelled Low, so the installer
+//     can write there and nowhere else it was not already allowed to.
 //  2. The ETW trace across the run is read for the installer's process tree.
-//     C1 fails on any write-class operation on C: outside the exemptions, on
-//     any open the deny refused (STATUS_ACCESS_DENIED), and whenever the ACE
-//     could not be applied, verified or removed.
+//     C1 fails on any write-class operation on C: outside the exemptions — which
+//     is how a write to something Windows itself labels Low (LocalLow) is still
+//     caught — on any open refused with STATUS_ACCESS_DENIED, and whenever the
+//     enforcement could not be applied or verified.
 //
 // The change-journal diff survives only as a report line; it never gates.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// The denied rights, by their access-mask names. File-specific rights from
-// "File Access Rights Constants" (learn.microsoft.com/windows/win32/fileio/
-// file-access-rights-constants), DELETE from "Standard Access Rights"
-// (learn.microsoft.com/windows/win32/secauthz/standard-access-rights); values
-// from winnt.h. On a directory WRITE_DATA is FILE_ADD_FILE and APPEND_DATA is
-// FILE_ADD_SUBDIRECTORY. WRITE_DAC and WRITE_OWNER are not write-class data
-// rights and are not denied; the trace still sees any write they would enable.
-const (
-	fileWriteData       = 0x00000002 // FILE_WRITE_DATA / FILE_ADD_FILE
-	fileAppendData      = 0x00000004 // FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
-	fileWriteEA         = 0x00000010 // FILE_WRITE_EA
-	fileDeleteChild     = 0x00000040 // FILE_DELETE_CHILD
-	fileWriteAttributes = 0x00000100 // FILE_WRITE_ATTRIBUTES
-	accessDelete        = 0x00010000 // DELETE
+// LowIntegritySID is the Low mandatory level (learn.microsoft.com/windows/win32/
+// secauthz/well-known-sids: SECURITY_MANDATORY_LOW_RID 0x1000).
+const LowIntegritySID = "S-1-16-4096"
 
-	// DenyMask is the ACE's ACCESS_MASK: 0x00010156.
-	DenyMask uint32 = fileWriteData | fileAppendData | fileWriteEA | fileDeleteChild | fileWriteAttributes | accessDelete
-
-	// DenyInherit is OBJECT_INHERIT_ACE (0x1) | CONTAINER_INHERIT_ACE (0x2)
-	// (learn.microsoft.com/windows/win32/api/winnt/ns-winnt-ace_header): files
-	// and directories below C:\ inherit it, and it applies to C:\ itself.
-	DenyInherit byte = 0x1 | 0x2
-
-	// DenyIcacls is the same ACE in icacls' vocabulary (learn.microsoft.com/
-	// windows-server/administration/windows-commands/icacls): WD write data/add
-	// file, AD append data/add subdirectory, WA write attributes, WEA write
-	// extended attributes, D delete, DC delete child; (OI)(CI) as above.
-	DenyIcacls = "(OI)(CI)(WD,AD,WA,WEA,D,DC)"
-)
-
-// DenyMaskNames is DenyMask spelled out, for the result.
-var DenyMaskNames = []string{"FILE_WRITE_DATA", "FILE_APPEND_DATA", "FILE_WRITE_ATTRIBUTES",
-	"FILE_WRITE_EA", "DELETE", "FILE_DELETE_CHILD"}
-
-// Enforcement is the deny ACE, as applied, read back and removed.
+// Enforcement is how the installer was kept off C:, as applied and proved.
 type Enforcement struct {
-	Path        string   `json:"path"`
-	Trustee     string   `json:"trustee"`
-	SID         string   `json:"sid"`
-	Command     string   `json:"command"`
-	ACE         string   `json:"ace_read_back"` // SDDL form of the ACE found on Path after applying
-	Mask        uint32   `json:"access_mask"`
-	MaskNames   []string `json:"access_mask_names"`
-	Inheritance string   `json:"inheritance"`
-	Exemptions  []string `json:"exemptions"`
-	ExemptWhy   string   `json:"exemptions_why"`
-	Probes      []string `json:"probes,omitempty"`
-	ApplySec    float64  `json:"apply_seconds"`
-	RemoveSec   float64  `json:"remove_seconds"`
-	Applied     bool     `json:"applied"`
-	Verified    bool     `json:"verified"`
-	Removed     bool     `json:"removed"`
-	Error       string   `json:"error,omitempty"`
-	RemoveError string   `json:"remove_error,omitempty"`
+	Mechanism  string   `json:"mechanism"`
+	Integrity  string   `json:"installer_integrity_sid"`
+	Policy     string   `json:"policy"`
+	LabeledLow []string `json:"labelled_low"` // (OI)(CI) Low labels the harness set, off C:
+	Exemptions []string `json:"exemptions"`
+	ExemptWhy  string   `json:"exemptions_why"`
+	Probes     []string `json:"probes,omitempty"`
+	Verified   bool     `json:"verified"`
+	Error      string   `json:"error,omitempty"`
 }
 
 // Why says why the enforcement cannot vouch for a run; "" when it can.
 func (e *Enforcement) Why() string {
 	switch {
 	case e == nil:
-		return "no deny ACE was applied to C:, so nothing stopped the installer writing there"
+		return "the installer was not run under any enforcement, so nothing stopped it writing to C:"
 	case e.Error != "":
-		return "the deny ACE could not be applied or verified: " + e.Error
-	case !e.Applied || !e.Verified:
-		return "the deny ACE was never verified on " + e.Path
-	case e.RemoveError != "":
-		return "the deny ACE could not be removed after the run: " + e.RemoveError
+		return "the enforcement could not be applied or verified: " + e.Error
+	case !e.Verified:
+		return "the enforcement was never verified"
 	}
 	return ""
 }
@@ -204,13 +172,13 @@ func SystemDiskVerdict(e *Enforcement, w *WriteAudit) (bool, string) {
 	case w.Error != "":
 		return false, "the trace cannot vouch for the run: " + w.Error
 	case len(w.Denied) > 0:
-		return false, fmt.Sprintf("the installer tree TRIED to write to C: and the deny ACE refused it: "+
+		return false, fmt.Sprintf("the installer tree TRIED to write to C: and Windows refused it: "+
 			"%d attempt(s), first: %s", len(w.Denied), w.Denied[0])
 	case len(w.Writes) > 0:
 		return false, fmt.Sprintf("the installer tree performed %d write-class operation(s) on C: outside "+
 			"the exemptions, first: %s", len(w.Writes), w.Writes[0])
 	}
-	return true, fmt.Sprintf("deny ACE %s held on %s for the whole run; %d file events from the installer "+
-		"tree traced, no write-class operation and no refused attempt on C: outside %s (%d inside it)",
-		e.ACE, e.Path, w.Events, strings.Join(e.Exemptions, ", "), len(w.Exempt))
+	return true, fmt.Sprintf("the installer tree ran at %s (%s); %d of its file events traced, no "+
+		"write-class operation and no refused attempt on C: outside %s (%d inside it)",
+		e.Integrity, e.Mechanism, w.Events, strings.Join(e.Exemptions, ", "), len(w.Exempt))
 }

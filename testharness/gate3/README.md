@@ -37,15 +37,22 @@ possible way to test nothing at all.
 
 Nothing in a verdict comes from the installer's account of itself.
 
-**The invariant — nothing written to C:, by enforcement.** Before each run the migration account is
-given an explicit **deny** ACE on `C:\` — `FILE_WRITE_DATA`, `FILE_APPEND_DATA`, `FILE_WRITE_ATTRIBUTES`,
-`FILE_WRITE_EA`, `DELETE`, `FILE_DELETE_CHILD` (mask `0x00010156`), `OBJECT_INHERIT_ACE |
-CONTAINER_INHERIT_ACE` — exempting only its own profile directory (its TEMP is inside it). The ACE is
-read back, proved by making the account try to create directories (refused at `C:\` and under
-`C:\ProgramData`, allowed in the profile), and removed after the run. C1 then reads the ETW trace for
-the installer's process tree and fails on any write-class operation on C: outside the exemption, any open
-the deny refused (`STATUS_ACCESS_DENIED`), or an ACE that could not be applied, verified or removed.
-Writes inside the exemption are listed in every result.
+**The invariant — nothing written to C:, by enforcement.** The installer's process tree runs at **Low
+mandatory integrity**. Windows treats every object without a label as Medium, and the default policy,
+`NO_WRITE_UP`, refuses a Low process write access to it before the DACL is consulted — so there is no ACL
+to propagate and no protected DACL (`C:\ProgramData`, `C:\Windows`) to slip past. Reading is untouched
+(`NO_READ_UP` is not the default for files). Only the harness's destination volumes and work directory,
+none of them on C:, are labelled Low. Before every run the session is proved: `whoami /groups` must show
+`S-1-16-4096`, and `md` must be refused at `C:\`, `C:\ProgramData`, `C:\Windows\Temp`,
+`C:\Program Files`, `C:\Users\Public`, the account's profile and its TEMP, and must succeed on each
+destination. C1 then reads the ETW trace for the installer's tree and fails on any write-class operation
+on C: outside the profile exemption (which is how a write to something Windows itself labels Low is still
+caught), any open Windows refused (`STATUS_ACCESS_DENIED`), or an enforcement that was not verified.
+The first design, a deny ACE on `C:\`, took 282 s to propagate and never reached `C:\ProgramData`.
+
+One consequence, stated: at Low the installer's `manage-bde -status` probe cannot answer, so BitLocker is
+reported unknown and the suspend step is planned anyway — the path the installer already takes on a
+machine where the probe fails.
 
 The whole-disk change-journal diff this replaced never converged on a shared runner: Windows' own
 servicing writes C: whatever the installer does. It is still recorded, as a report line that never gates.
@@ -159,7 +166,8 @@ Those three work anywhere. Everything that touches a machine — `mint-token`, `
 `prove-red` — is Windows-only and refuses to exist elsewhere.
 
 `prove-red` is DECISIONS.md **D34** applied to the one check that cannot be exercised off a real
-machine: under the same trace, it reads a C: file, writes one to C:, tries to write into a directory
-carrying the run's deny ACE, and writes into a declared exemption, and requires each to be classified
-correctly and C1 to go red. A check nobody has watched fail is a check nobody knows works. It runs as its
-own job in the workflow, and the verdict refuses to pass if it did not.
+machine: it starts a copy of itself at Low integrity through the run's own launcher and trace; the copy
+reads a C: file, writes into a Low-labelled C: directory that is not exempt, is refused writing into an
+ordinary one, and writes into a declared exemption. Each must be classified correctly and C1 must go red.
+A check nobody has watched fail is a check nobody knows works. It runs as its own job in the workflow,
+and the verdict refuses to pass if it did not.

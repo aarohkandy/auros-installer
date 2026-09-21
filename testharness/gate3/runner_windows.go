@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -39,9 +40,9 @@ type RunConfig struct {
 //
 // The order is the whole design:
 //
-//	deny the migration user every write to C: → start the trace →
-//	run the installer as that user → fire the scenario at its pin, measured
-//	from outside the process → read the trace and lift the deny →
+//	drop the migration user to Low integrity and prove C: refuses it →
+//	start the trace → run the installer in that session → fire the scenario
+//	at its pin, measured from outside the process → read the trace →
 //	re-hash the source → re-hash the archive → read what the installer
 //	claimed → decide
 //
@@ -92,7 +93,7 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 
 	// ── log the migration user on first ───────────────────────────────────────
 	// A logon and profile load wake Windows' own per-user machinery; that is
-	// harness setup, not the installer, and it happens before the deny ACE.
+	// harness setup, not the installer, and it happens at the account's own level.
 	sess, err := LogonMigrationUser(cfg.User, cfg.Password)
 	if err != nil {
 		return nil, err
@@ -103,12 +104,24 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	defer sess.Close()
 	res.Elevated = sess.Elevated
 
-	// ── C1: deny the account every write to C: for the length of the run ────
-	// Applied after the logon (a logon writes the profile, which is exempt
-	// anyway) and before anything is measured. Removed after the run, always.
-	enf := ApplyEnforcement(sess, cfg.User, cfg.WorkDir)
+	// ── C1: the installer runs at Low integrity, and that is proved first ────
+	// Only the harness's own volumes and work directory are labelled Low; every
+	// unlabelled object on C: is Medium, and Low cannot write up to it.
+	lowDirs := []string{cfg.DestVolume}
+	if cfg.SmallVolume != "" {
+		lowDirs = append(lowDirs, cfg.SmallVolume)
+	}
+	if sc != nil && sc.Dest == DestAuto {
+		// The installer picks the volume with the most free space, which on a
+		// runner may be D:. Every fixed volume but C: is a candidate it must be
+		// able to write to; C: never is.
+		lowDirs = otherFixedVolumes(lowDirs)
+	}
+	low, enf := ApplyEnforcement(sess, cfg.WorkDir, lowDirs)
 	res.Enforcement = enf
-	defer enf.Remove()
+	if low != nil {
+		defer syscall.CloseHandle(low.Token)
+	}
 	if enf.Why() != "" {
 		res.Evaluate(sc, len(g.ByGolden))
 		return res, nil
@@ -209,7 +222,7 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	outPath := filepath.Join(cfg.WorkDir, "installer-"+cfg.RunID+".out")
 
 	started := time.Now()
-	proc, err := StartInstaller(sess, cfg.Tool, args, outPath, cfg.WorkDir)
+	proc, err := StartInstaller(low, cfg.Tool, args, outPath, cfg.WorkDir)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +255,6 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 		attr = trace.Attribute([]uint32{proc.PID()})
 	}
 	res.InstallerWrites = attr.AuditWrites(enf.Exemptions)
-	enf.Remove()
 	if merr == nil { // the change-journal diff: a report line, never a verdict
 		rep, derr := DiffUSN(mark, injectedPaths(devs, cfg), attr)
 		if derr != nil && rep == nil {

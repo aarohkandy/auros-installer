@@ -3,240 +3,200 @@
 package gate3
 
 import (
-	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 )
 
-// The deny ACE of enforce.go, applied with icacls. icacls sets the DACL through
-// SetNamedSecurityInfo, which propagates inheritable ACEs to existing children
-// (learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow),
-// so applying and removing it each walk C:. Both are timed into the result.
-
 var (
-	procGetNamedSecurityInfoW    = modadvapi32.NewProc("GetNamedSecurityInfoW")
+	procSetTokenInformation      = modadvapi32.NewProc("SetTokenInformation")
 	procGetUserProfileDirectoryW = moduserenv.NewProc("GetUserProfileDirectoryW")
 )
 
-// ApplyEnforcement denies the migration account write-class rights on C:\,
-// reads the ACE back, and proves it by making the account try: a directory at
-// C:\ and one inherited under C:\ProgramData must be refused, and one in the
-// account's profile (the exemption) must be allowed. It never returns nil; the
-// caller defers Remove whatever happened.
-//
-// The one exemption is the profile directory, where Windows keeps what a logon
-// needs. Its explicit grant to the account comes before the inherited deny in
-// the DACL's canonical order, and the probe proves that rather than assuming it.
-// TEMP needs no exemption of its own: the account's TEMP is under its profile.
-// The installer does not write TEMP or logs on Windows (its run log goes to the
-// destination, its output to the harness's work directory); if it ever did, the
-// write would be listed under writes_inside_exemptions in every result.
-func ApplyEnforcement(s *UserSession, user, workDir string) *Enforcement {
-	e := &Enforcement{Path: `C:\`, Trustee: user, SID: s.SID, Mask: DenyMask, MaskNames: DenyMaskNames,
-		Inheritance: "OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE",
-		ExemptWhy: "the account's own profile directory, which Windows needs to log it on and run it " +
-			"(its TEMP is inside it); its explicit grant precedes the inherited deny"}
-	prof, err := profileDir(s.Token)
+// LowIntegrityToken returns a primary copy of tok at Low mandatory integrity:
+// DuplicateTokenEx, then SetTokenInformation(TokenIntegrityLevel) with a
+// TOKEN_MANDATORY_LABEL naming S-1-16-4096 and SE_GROUP_INTEGRITY, as in
+// "Designing Applications to Run at a Low Integrity Level"
+// (learn.microsoft.com/previous-versions/dotnet/articles/bb625960(v=msdn.10)).
+// The caller closes it.
+func LowIntegrityToken(tok syscall.Handle) (syscall.Handle, error) {
+	var dup syscall.Handle
+	if r, _, e := procDuplicateTokenEx.Call(uintptr(tok), tokenAllAccess, 0, securityImpersonation,
+		tokenPrimary, uintptr(unsafe.Pointer(&dup))); r == 0 {
+		return 0, fmt.Errorf("DuplicateTokenEx: %w", e)
+	}
+	sid, err := syscall.StringToSid(LowIntegritySID)
 	if err != nil {
-		e.Error = "the migration account's profile directory is unknown: " + err.Error()
-		return e
+		syscall.CloseHandle(dup)
+		return 0, err
 	}
-	e.Exemptions = []string{prof}
-	if e.SID == "" {
-		e.Error = "the migration account's SID is unknown"
-		return e
+	const tokenIntegrityLevel, seGroupIntegrity = 25, 0x20
+	label := syscall.SIDAndAttributes{Sid: sid, Attributes: seGroupIntegrity}
+	r, _, e := procSetTokenInformation.Call(uintptr(dup), tokenIntegrityLevel, uintptr(unsafe.Pointer(&label)),
+		unsafe.Sizeof(label)+uintptr(sid.Len()))
+	runtime.KeepAlive(sid)
+	if r == 0 {
+		syscall.CloseHandle(dup)
+		return 0, fmt.Errorf("SetTokenInformation(TokenIntegrityLevel): %w", e)
 	}
-	aces, err := daclACEs(e.Path)
-	if err != nil {
-		e.Error = err.Error()
-		return e
-	}
-	for _, a := range aces {
-		if a.sid == e.SID {
-			e.Error = fmt.Sprintf("%s already carries an ACE for %s (%s), so removing ours afterwards could "+
-				"not restore it", e.Path, e.SID, a)
-			return e
-		}
-	}
-	e.Command = fmt.Sprintf(`icacls %s /deny *%s:%s`, e.Path, e.SID, DenyIcacls)
-	t0 := time.Now()
-	e.Applied = true // from here on Remove must run, even if icacls half-failed
-	ace, err := ApplyDeny(e.Path, e.SID)
-	e.ApplySec = time.Since(t0).Seconds()
-	if err != nil {
-		e.Error = err.Error()
-		return e
-	}
-	e.ACE = ace
-	for _, p := range []struct {
-		dir   string
-		allow bool
-	}{
-		{`C:\auros-gate3-ace-probe`, false},
-		{`C:\ProgramData\auros-gate3-ace-probe`, false},
-		{filepath.Join(prof, "auros-gate3-ace-probe"), true},
-	} {
-		created, line := probeMkdir(s, p.dir, workDir)
-		e.Probes = append(e.Probes, line)
-		if created != p.allow {
-			e.Error = "the deny ACE did not do what it says: " + line
-			return e
-		}
-	}
-	e.Verified = true
-	return e
+	return dup, nil
 }
 
-// Remove takes the ACE off again and checks it is gone. Safe to call twice.
-func (e *Enforcement) Remove() {
-	if e == nil || !e.Applied || e.Removed {
-		return
+// LabelLow gives dir an inheritable Low mandatory label, so a Low process can
+// write under it: `icacls <dir> /setintegritylevel (OI)(CI)L`
+// (learn.microsoft.com/windows-server/administration/windows-commands/icacls).
+// Only ever used on the harness's own volumes and directories, never on C:.
+func LabelLow(dir string) error {
+	if strings.EqualFold(filepath.VolumeName(dir), "C:") {
+		return fmt.Errorf("refusing to label %s Low: that would open the system disk to the installer", dir)
 	}
-	t0 := time.Now()
-	err := RemoveDeny(e.Path, e.SID)
-	e.RemoveSec = time.Since(t0).Seconds()
+	out, err := exec.Command("icacls", dir, "/setintegritylevel", "(OI)(CI)L").CombinedOutput()
 	if err != nil {
-		e.RemoveError = err.Error()
-		return
-	}
-	e.Removed, e.RemoveError = true, ""
-}
-
-// ApplyDeny adds the deny ACE for sid on path and returns it as read back.
-func ApplyDeny(path, sid string) (string, error) {
-	out, err := exec.Command("icacls", path, "/deny", "*"+sid+":"+DenyIcacls).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("icacls /deny on %s: %v: %s", path, err, strings.TrimSpace(string(out)))
-	}
-	aces, err := daclACEs(path)
-	if err != nil {
-		return "", err
-	}
-	for _, a := range aces {
-		if a.sid == sid && a.typ == aceTypeDenied && a.flags&(DenyInherit|aceInherited) == DenyInherit &&
-			a.mask&DenyMask == DenyMask {
-			return a.String(), nil
-		}
-	}
-	return "", fmt.Errorf("icacls reported success but %s carries no explicit OI|CI deny of 0x%08X for %s",
-		path, DenyMask, sid)
-}
-
-// RemoveDeny removes every deny ACE for sid on path and checks none is left.
-func RemoveDeny(path, sid string) error {
-	out, err := exec.Command("icacls", path, "/remove:d", "*"+sid).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("icacls /remove:d on %s: %v: %s", path, err, strings.TrimSpace(string(out)))
-	}
-	aces, err := daclACEs(path)
-	if err != nil {
-		return err
-	}
-	for _, a := range aces {
-		if a.sid == sid && a.typ == aceTypeDenied {
-			return fmt.Errorf("%s still carries %s after icacls /remove:d", path, a)
-		}
+		return fmt.Errorf("icacls %s /setintegritylevel: %v: %s", dir, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// probeMkdir runs `md dir` as the migration account and reports whether the
-// directory came into existence. The harness removes it again.
-func probeMkdir(s *UserSession, dir, workDir string) (bool, string) {
-	os.Remove(dir)
-	out := filepath.Join(workDir, "ace-probe.txt")
-	p, err := StartInstaller(s, filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"),
-		[]string{"/c", "md", dir}, out, workDir)
+// ApplyEnforcement prepares the Low-integrity session the installer runs in and
+// proves it: in that session, creating a directory must be refused at every
+// probe on C: (a broad sample: folders whose DACL would let the account write,
+// and folders with protected DACLs) and must succeed in each Low-labelled
+// destination, and `whoami /groups` must report the Low label. Any miss fails
+// closed. The caller closes the returned session's token.
+//
+// The declared exemption is the account's profile directory, where Windows
+// keeps what a logon needs. At Low only its Low-labelled part (LocalLow) is
+// writable at all; writes there are listed, not failed. The account's TEMP is
+// inside the profile, and is probed: it must be refused too. The installer
+// writes no TEMP or logs on Windows (its run log goes to the destination, its
+// output to the harness's work directory).
+func ApplyEnforcement(s *UserSession, workDir string, lowDirs []string) (*UserSession, *Enforcement) {
+	e := &Enforcement{
+		Mechanism: "mandatory integrity control: the installer tree runs at Low; only the harness's " +
+			"destination volumes and work directory are labelled Low",
+		Integrity: LowIntegritySID,
+		Policy: "SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, the default for every object; objects without a " +
+			"label are Medium",
+		ExemptWhy: "the account's own profile directory, which Windows needs for the logon (its TEMP is " +
+			"inside it and is still refused at Low; only LocalLow is writable)",
+	}
+	prof, err := profileDir(s.Token)
 	if err != nil {
-		return false, "md " + dir + ": " + err.Error()
+		e.Error = "the migration account's profile directory is unknown: " + err.Error()
+		return nil, e
+	}
+	e.Exemptions = []string{prof}
+	for _, d := range append([]string{workDir}, lowDirs...) {
+		if err := LabelLow(d); err != nil {
+			e.Error = err.Error()
+			return nil, e
+		}
+		e.LabeledLow = append(e.LabeledLow, d)
+	}
+	lowTok, err := LowIntegrityToken(s.Token)
+	if err != nil {
+		e.Error = err.Error()
+		return nil, e
+	}
+	low := &UserSession{Token: lowTok, SID: s.SID, Elevated: s.Elevated, name: s.name, keepProfile: true}
+
+	groups, _ := runAs(low, workDir, filepath.Join(os.Getenv("SystemRoot"), "System32", "whoami.exe"), "/groups")
+	if !strings.Contains(groups, LowIntegritySID) {
+		e.Error = "the installer's session does not report the Low mandatory label: " + tail(groups, 400)
+		return low, e
+	}
+	e.Probes = append(e.Probes, "whoami /groups in the installer's session reports "+LowIntegritySID)
+
+	type probe struct {
+		dir   string
+		allow bool
+	}
+	probes := []probe{
+		{`C:\`, false}, {`C:\ProgramData`, false}, {`C:\Windows\Temp`, false}, {`C:\Program Files`, false},
+		{`C:\Users\Public`, false}, {prof, false}, {filepath.Join(prof, `AppData\Local\Temp`), false},
+	}
+	for _, d := range lowDirs {
+		probes = append(probes, probe{d, true})
+	}
+	for _, p := range probes {
+		created, line := probeMkdir(low, filepath.Join(p.dir, "auros-gate3-enforcement-probe"), workDir)
+		e.Probes = append(e.Probes, line)
+		if created != p.allow {
+			e.Error = "the enforcement did not do what it says: " + line
+			return low, e
+		}
+	}
+	e.Verified = true
+	return low, e
+}
+
+// runAs runs one command in the session and returns what it printed.
+func runAs(s *UserSession, workDir, exe string, args ...string) (string, int) {
+	out := filepath.Join(workDir, "enforcement-probe.txt")
+	os.Remove(out)
+	p, err := StartInstaller(s, exe, args, out, workDir)
+	if err != nil {
+		return err.Error(), -1
 	}
 	code, timedOut := p.Wait(time.Minute)
 	if timedOut {
 		p.Kill()
 	}
 	p.Close()
+	said, _ := os.ReadFile(out)
+	return string(said), code
+}
+
+// probeMkdir runs `md dir` in the session and reports whether the directory
+// came into existence. The harness removes it again.
+func probeMkdir(s *UserSession, dir, workDir string) (bool, string) {
+	os.Remove(dir)
+	said, code := runAs(s, workDir, filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), "/c", "md", dir)
 	_, serr := os.Stat(dir)
 	os.Remove(dir)
-	said, _ := os.ReadFile(out)
-	return serr == nil, fmt.Sprintf("md %s as the migration account: exit %d, created %v (%s)",
-		dir, code, serr == nil, strings.TrimSpace(string(said)))
+	return serr == nil, fmt.Sprintf("md %s at Low: exit %d, created %v (%s)", dir, code, serr == nil,
+		strings.TrimSpace(said))
 }
 
-// ACE types and flags (winnt.h; learn.microsoft.com/windows/win32/api/winnt/ns-winnt-ace_header).
-const (
-	aceTypeAllowed = 0
-	aceTypeDenied  = 1
-	aceInherited   = 0x10 // INHERITED_ACE
+var (
+	procGetLogicalDriveStringsW = modkernel32.NewProc("GetLogicalDriveStringsW")
+	procGetDriveTypeW           = modkernel32.NewProc("GetDriveTypeW")
 )
 
-type aceEntry struct {
-	typ, flags byte
-	mask       uint32
-	sid        string
-}
-
-// String is the ACE in SDDL form, with the mask in hex.
-func (a aceEntry) String() string {
-	t := map[byte]string{aceTypeAllowed: "A", aceTypeDenied: "D"}[a.typ]
-	var f string
-	for _, x := range []struct {
-		bit  byte
-		name string
-	}{{0x1, "OI"}, {0x2, "CI"}, {0x4, "NP"}, {0x8, "IO"}, {aceInherited, "ID"}} {
-		if a.flags&x.bit != 0 {
-			f += x.name
+// otherFixedVolumes adds every fixed volume root except C:\ to have.
+func otherFixedVolumes(have []string) []string {
+	buf := make([]uint16, 512)
+	n, _, _ := procGetLogicalDriveStringsW.Call(uintptr(len(buf)), uintptr(unsafe.Pointer(&buf[0])))
+	seen := map[string]bool{}
+	for _, h := range have {
+		seen[strings.ToUpper(filepath.VolumeName(h))] = true
+	}
+	for i := 0; i < int(n); {
+		j := i
+		for j < int(n) && buf[j] != 0 {
+			j++
+		}
+		root := syscall.UTF16ToString(buf[i:j])
+		i = j + 1
+		if root == "" {
+			continue
+		}
+		p, _ := syscall.UTF16PtrFromString(root)
+		const driveFixed = 3
+		t, _, _ := procGetDriveTypeW.Call(uintptr(unsafe.Pointer(p)))
+		v := strings.ToUpper(filepath.VolumeName(root))
+		if t == driveFixed && v != "C:" && !seen[v] {
+			seen[v] = true
+			have = append(have, root)
 		}
 	}
-	return fmt.Sprintf("(%s;%s;0x%08X;;;%s)", t, f, a.mask, a.sid)
-}
-
-// daclACEs reads path's DACL and returns its allow and deny ACEs. The ACL is
-// walked by hand — ACL header (8 bytes), then per ACE an ACE_HEADER (type,
-// flags, size), the ACCESS_MASK and the SID — because this module takes no
-// dependencies.
-func daclACEs(path string) ([]aceEntry, error) {
-	p, err := syscall.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	const seFileObject, daclSecurityInformation = 1, 4
-	var dacl *byte
-	var sd syscall.Handle
-	if r, _, _ := procGetNamedSecurityInfoW.Call(uintptr(unsafe.Pointer(p)), seFileObject,
-		daclSecurityInformation, 0, 0, uintptr(unsafe.Pointer(&dacl)), 0, uintptr(unsafe.Pointer(&sd))); r != 0 {
-		return nil, fmt.Errorf("GetNamedSecurityInfo(%s): %w", path, syscall.Errno(r))
-	}
-	defer syscall.LocalFree(sd)
-	if dacl == nil {
-		return nil, fmt.Errorf("%s has a NULL DACL", path)
-	}
-	hdr := unsafe.Slice(dacl, 8)
-	acl := unsafe.Slice(dacl, int(binary.LittleEndian.Uint16(hdr[2:4])))
-	count := int(binary.LittleEndian.Uint16(hdr[4:6]))
-	var out []aceEntry
-	for i, off := 0, 8; i < count && off+8 <= len(acl); i++ {
-		typ, flags := acl[off], acl[off+1]
-		size := int(binary.LittleEndian.Uint16(acl[off+2 : off+4]))
-		if size < 8 || off+size > len(acl) {
-			return nil, fmt.Errorf("%s: malformed ACE %d", path, i)
-		}
-		if typ == aceTypeAllowed || typ == aceTypeDenied {
-			sid, err := (*syscall.SID)(unsafe.Pointer(&acl[off+8])).String()
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, aceEntry{typ: typ, flags: flags,
-				mask: binary.LittleEndian.Uint32(acl[off+4 : off+8]), sid: sid})
-		}
-		off += size
-	}
-	return out, nil
+	return have
 }
 
 func profileDir(tok syscall.Handle) (string, error) {
