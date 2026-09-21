@@ -135,17 +135,31 @@ jobs:
         with: { name: bin, path: dist }
       - id: m
         shell: bash -euo pipefail {0}
+        # Inputs arrive through env, never spliced into the script: a dispatch input is
+        # text someone typed, and bash arithmetic on it would execute it.
+        env:
+          IN_SHARDS: ${{ inputs.clean_shards }}
+          IN_PER: ${{ inputs.runs_per_shard }}
+          IN_PROFILE: ${{ inputs.profile }}
+          IN_FAULTS: ${{ inputs.faults }}
         run: |
           chmod +x dist/gate3-linux
-          SHARDS='${{ inputs.clean_shards }}';   SHARDS=${SHARDS:-$DEFAULT_CLEAN_SHARDS}
-          PER='${{ inputs.runs_per_shard }}';    PER=${PER:-$DEFAULT_RUNS_PER_SHARD}
-          PROFILE='${{ inputs.profile }}';       PROFILE=${PROFILE:-$DEFAULT_PROFILE}
-          FAULTS='${{ inputs.faults }}';         FAULTS=${FAULTS:-$DEFAULT_FAULTS}
+          SHARDS=${IN_SHARDS:-$DEFAULT_CLEAN_SHARDS}
+          PER=${IN_PER:-$DEFAULT_RUNS_PER_SHARD}
+          PROFILE=${IN_PROFILE:-$DEFAULT_PROFILE}
+          FAULTS=${IN_FAULTS:-$DEFAULT_FAULTS}
+          for n in "$SHARDS" "$PER"; do
+            [[ "$n" =~ ^[0-9]+$ ]] || { echo "::error::shard and run counts must be whole numbers, got '$n'"; exit 1; }
+          done
+          # Zero runs per shard is zero clean runs, not N empty shards (pwsh's 0..-1 counts DOWN).
+          [ "$PER" -eq 0 ] && SHARDS=0
           if [ "$FAULTS" = all ]; then
             FAULTS=$(dist/gate3-linux suite | awk 'NR>1 {printf "%s%s", sep, $1; sep=","}')
           fi
-          echo "shards=$(seq 0 $((SHARDS-1)) | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
-          echo "faults=$(echo "$FAULTS" | tr ',' '\n' | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+          # Either list may be empty ([]): the job that would fan out over it is then
+          # skipped by its `if:` rather than rejecting the whole workflow at startup.
+          echo "shards=$(jq -nc --argjson n "$SHARDS" '[range($n) | tostring]')" >> $GITHUB_OUTPUT
+          echo "faults=$(echo "$FAULTS" | tr ',' '\n' | jq -R 'select(length > 0)' | jq -sc .)" >> $GITHUB_OUTPUT
           echo "fault_list=$FAULTS" >> $GITHUB_OUTPUT
           echo "runs_per_shard=$PER" >> $GITHUB_OUTPUT
           echo "clean_total=$((SHARDS*PER))" >> $GITHUB_OUTPUT
@@ -172,6 +186,9 @@ jobs:
   # ── The clean runs. ─────────────────────────────────────────────────────────────────────────────
   clean:
     needs: [build, plan]
+    # An empty shard list is a fromJSON matrix with no values, which GitHub rejects
+    # at startup for the WHOLE workflow. Skip the job instead; verdict still runs.
+    if: needs.plan.outputs.shards != '[]'
     runs-on: windows-latest
     timeout-minutes: 330
     strategy:
@@ -240,6 +257,7 @@ jobs:
   # ── The induced failures. The abort path, tested harder than the happy path. ────────────────────
   faults:
     needs: [build, plan]
+    if: needs.plan.outputs.faults != '[]'
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:

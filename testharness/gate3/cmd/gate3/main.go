@@ -258,20 +258,68 @@ func cmdAggregate(args []string) error {
 		}
 	}
 
+	var profiles []string
+	for _, r := range append(append([]row{}, clean...), valuesOf(faults)...) {
+		profiles = append(profiles, r.res.Profile)
+	}
+	missing := len(wanted) - countPresent(wanted, faults)
+	var verdict error
+	if cleanPass != *expectClean || faultPass != len(wanted) || missing > 0 || len(clean) != *expectClean {
+		verdict = fmt.Errorf("GATE 3 NOT PASSED: %d/%d clean, %d/%d induced failures, %d runs missing",
+			cleanPass, *expectClean, faultPass, len(wanted), missing+*expectClean-len(clean))
+	} else {
+		var claim string
+		if claim, verdict = gateClaim(*expectClean, wanted, profiles); verdict == nil {
+			fmt.Fprintf(&b, "\n**%s**\n", claim)
+		}
+	}
+
 	fmt.Print(b.String())
 	if *summary != "" {
 		if err := os.WriteFile(*summary, []byte(b.String()), 0o644); err != nil {
 			return err
 		}
 	}
+	return verdict
+}
 
-	missing := len(wanted) - countPresent(wanted, faults)
-	if cleanPass != *expectClean || faultPass != len(wanted) || missing > 0 || len(clean) != *expectClean {
-		return fmt.Errorf("GATE 3 NOT PASSED: %d/%d clean, %d/%d induced failures, %d runs missing",
-			cleanPass, *expectClean, faultPass, len(wanted), missing+*expectClean-len(clean))
+// gateClaim is what a run in which every owed run passed may say about Gate 3.
+// "GATE 3 PASSED" is reserved for the §6C shape: at least 100 clean runs, every
+// scenario in the catalogue, and every corpus the realistic profile. A smaller
+// shape — the push run is two compact runs and three faults — says what it was.
+// A shape that owed nothing measured nothing, and is an error rather than a pass.
+func gateClaim(expectClean int, wanted, profiles []string) (string, error) {
+	if expectClean == 0 && len(wanted) == 0 {
+		return "", fmt.Errorf("GATE 3 NOT PASSED: the run owed zero clean runs and zero induced failures, " +
+			"so nothing was measured")
 	}
-	fmt.Println("GATE 3 PASSED")
-	return nil
+	var short []string
+	if expectClean < 100 {
+		short = append(short, fmt.Sprintf("%d clean runs of the 100 §6C requires", expectClean))
+	}
+	owed := map[string]bool{}
+	for _, id := range wanted {
+		owed[id] = true
+	}
+	var notRun []string
+	for _, sc := range gate3.Suite() {
+		if !owed[strings.ToUpper(sc.ID)] {
+			notRun = append(notRun, sc.ID)
+		}
+	}
+	if len(notRun) > 0 {
+		short = append(short, fmt.Sprintf("%d catalogue scenarios not run (%s)", len(notRun), strings.Join(notRun, ",")))
+	}
+	for _, p := range profiles {
+		if p != "realistic" {
+			short = append(short, fmt.Sprintf("corpus profile %q, which gen says is not the exit condition", p))
+			break
+		}
+	}
+	if len(short) == 0 {
+		return "GATE 3 PASSED", nil
+	}
+	return "every run owed passed. This was NOT the Gate 3 suite: " + strings.Join(short, "; "), nil
 }
 
 func valuesOf(m map[string]row) []row {
