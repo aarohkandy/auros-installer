@@ -50,12 +50,29 @@ type Attribution struct {
 	byPID     map[uint32]int // file events per pid, any volume
 	Events    map[string]int // provider/event-id histogram, for the log
 	Err       string
+
+	// A write through a handle opened BEFORE the trace has no Create event.
+	// Its Write/SetInformation/SetDelete/Rename events carry a FileKey, and a
+	// FileKey is named by any event carrying both it and a FileName (NameCreate,
+	// or the name rundown StartTrace requests). keyed collects the writers per
+	// FileKey until the end of the trace, when the names are known.
+	keyName map[string]string            // FileKey -> full lowercased NT path
+	keyed   map[string]map[uint32]string // FileKey -> pid -> event id
+	Schema  map[string]string            // event id -> its data field names, for the log
+	// Unresolved lists handle-based writes whose FileKey no event named: the
+	// evidence for an unattributed change, printed rather than guessed at.
+	Unresolved []string
 }
 
 // Kernel-File events that name a path in the caller's context: Create (12),
 // DeletePath (26), RenamePath (27), CreateNewFile (30). NameCreate (10) and
 // friends are rundown events and are NOT the opener, so they are not counted.
 var fileEventIDs = map[int]bool{12: true, 26: true, 27: true, 30: true}
+
+// Kernel-File events that change a file through an open handle, keyed by
+// FileKey: Write (16), SetInformation (17, timestamps and attributes among
+// them), SetDelete (18), Rename (19).
+var handleEventIDs = map[int]bool{16: true, 17: true, 18: true, 19: true}
 
 type etwEvent struct {
 	System struct {
@@ -83,6 +100,7 @@ func ParseTrace(r io.Reader, device string, roots []uint32, images map[uint32]st
 		opens:  map[string]map[uint32]bool{}, parent: map[uint32]uint32{},
 		images: map[uint32]string{}, installer: map[uint32]bool{},
 		byPID: map[uint32]int{}, Events: map[string]int{},
+		keyName: map[string]string{}, keyed: map[string]map[uint32]string{}, Schema: map[string]string{},
 	}
 	for k, v := range images {
 		a.images[k] = v
@@ -112,6 +130,7 @@ func ParseTrace(r io.Reader, device string, roots []uint32, images map[uint32]st
 		}
 		a.add(ev)
 	}
+	a.resolveKeys()
 	a.closeTree(roots)
 	n := 0
 	for pid := range a.installer {
@@ -140,7 +159,35 @@ func (a *Attribution) add(ev etwEvent) {
 				a.images[pid] = img[strings.LastIndex(img, `\`)+1:]
 			}
 		}
-	case strings.EqualFold(ev.System.Provider.Name, "Microsoft-Windows-Kernel-File") && fileEventIDs[ev.System.EventID]:
+	case strings.EqualFold(ev.System.Provider.Name, "Microsoft-Windows-Kernel-File") &&
+		!fileEventIDs[ev.System.EventID]:
+		id := strconv.Itoa(ev.System.EventID)
+		if _, seen := a.Schema[id]; !seen {
+			var names []string
+			for _, d := range ev.Data {
+				names = append(names, d.Name)
+			}
+			a.Schema[id] = strings.Join(names, ",")
+		}
+		key := strings.ToLower(data["FileKey"])
+		if key == "" {
+			return
+		}
+		if name := data["FileName"]; name != "" {
+			a.keyName[key] = strings.ToLower(name)
+		}
+		if handleEventIDs[ev.System.EventID] {
+			pid, err := parseUint(ev.System.Execution.ProcessID)
+			if err != nil {
+				return
+			}
+			a.byPID[pid]++
+			if a.keyed[key] == nil {
+				a.keyed[key] = map[uint32]string{}
+			}
+			a.keyed[key][pid] = id
+		}
+	case strings.EqualFold(ev.System.Provider.Name, "Microsoft-Windows-Kernel-File"):
 		p := data["FileName"]
 		if p == "" {
 			p = data["FilePath"]
@@ -150,16 +197,36 @@ func (a *Attribution) add(ev etwEvent) {
 			return
 		}
 		a.byPID[pid]++
-		p = strings.ToLower(p)
-		if !strings.HasPrefix(p, a.device+`\`) {
-			return
-		}
-		p = strings.TrimPrefix(p, a.device)
-		if a.opens[p] == nil {
-			a.opens[p] = map[uint32]bool{}
-		}
-		a.opens[p][pid] = true
+		a.open(strings.ToLower(p), pid)
 	}
+}
+
+// open records that pid acted on a full NT path, if that path is on C:.
+func (a *Attribution) open(p string, pid uint32) {
+	if !strings.HasPrefix(p, a.device+`\`) {
+		return
+	}
+	p = strings.TrimPrefix(p, a.device)
+	if a.opens[p] == nil {
+		a.opens[p] = map[uint32]bool{}
+	}
+	a.opens[p][pid] = true
+}
+
+// resolveKeys turns handle-based writes into path attributions once every
+// FileKey the trace named is known. A key nobody named is kept as evidence.
+func (a *Attribution) resolveKeys() {
+	for key, pids := range a.keyed {
+		name, ok := a.keyName[key]
+		for pid, id := range pids {
+			if ok {
+				a.open(name, pid)
+			} else {
+				a.Unresolved = append(a.Unresolved, fmt.Sprintf("event %s by %s(%d) on FileKey %s", id, a.image(pid), pid, key))
+			}
+		}
+	}
+	sort.Strings(a.Unresolved)
 }
 
 // ProcessStart ids are decimal in tracerpt's rendering; accept hex too.
@@ -199,7 +266,7 @@ func (a *Attribution) Classify(cPath string) (kind, who string) {
 	}
 	pids := a.opens[p[2:]]
 	if len(pids) == 0 {
-		return Unattributed, "no process in the trace opened it"
+		return Unattributed, "no process in the trace opened it or wrote to it"
 	}
 	var mine, others []string
 	for pid := range pids {
