@@ -133,8 +133,24 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 		res.SystemDisk = &SystemDiskReport{Error: merr.Error(), Exclusions: NoiseRules(), ExclusionSHA: NoiseSHA()}
 	}
 
+	// A run that tells the installer to leave the cloud placeholders alone
+	// declares, in advance, that they must not be in the archive. If they are,
+	// the archive check says so by name.
+	if sc != nil && sc.CloudFiles == "skip" {
+		for _, rec := range g.ByCopy {
+			if rec.Placeholder {
+				devs = append(devs, Deviation{
+					Tree: "archive", Path: rec.Archive, Kind: "placeholder the user asked to leave alone",
+					Absent: true,
+					Note: "the run passed --cloud-files=skip, so this file must not have been copied; " +
+						"the installer also reduced its free-space requirement by these bytes",
+				})
+			}
+		}
+	}
+
 	// ── run the installer as the migration user ──────────────────────────────
-	args := installerArgs(destDir)
+	args := installerArgs(destDir, cloudFiles(sc))
 	res.ToolArgs = args
 	outPath := filepath.Join(cfg.WorkDir, "installer-"+cfg.RunID+".out")
 
@@ -237,8 +253,15 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 // No --commit: every run in this suite is a dry run and the wall is never
 // crossed. There is no --json, no --runlog and no verify subcommand; the
 // previous harness was written against all three.
-func installerArgs(destDir string) []string {
-	args := []string{"--i-understand-programs-do-not-migrate", "--cloud-files=hydrate"}
+func cloudFiles(sc *Scenario) string {
+	if sc != nil && sc.CloudFiles != "" {
+		return sc.CloudFiles
+	}
+	return "hydrate"
+}
+
+func installerArgs(destDir, cloud string) []string {
+	args := []string{"--i-understand-programs-do-not-migrate", "--cloud-files=" + cloud}
 	if destDir != "" {
 		args = append(args, "--dest", destDir)
 	}

@@ -103,6 +103,11 @@ type TreeReport struct {
 	Partials       []string  `json:"partials,omitempty"`
 	DeviationsSeen []string  `json:"deviations_seen,omitempty"`
 	DeviationsLost []Problem `json:"deviations_not_as_injected,omitempty"`
+	// DeviationsAbsent counts files a scenario said must not be there and that
+	// are not there. They are accounted for rather than ignored: an archive is
+	// still complete when the only files missing from it are the ones the run
+	// asked the installer not to copy.
+	DeviationsAbsent int `json:"deviations_absent,omitempty"`
 	// StreamsFound counts alternate data streams the harness found on the copies
 	// it checked. It is a MEASUREMENT, not a check: see ArchiveStreamNote.
 	StreamsChecked int `json:"streams_checked,omitempty"`
@@ -351,9 +356,11 @@ func CheckArchive(g *Golden, root string, devs []Deviation, complete bool) (*Tre
 			continue
 		}
 		if dev := deviationFor(devs, "archive", rel); dev != nil && (dev.Absent || dev.MayBeAbsent) {
+			rep.DeviationsAbsent++
 			continue
 		}
 		if dev := deviationFor(devs, "source", rec.Path); dev != nil && (dev.Absent || dev.MayBeAbsent) {
+			rep.DeviationsAbsent++
 			// A file the scenario removed from the SOURCE cannot be in the
 			// archive, and its absence there is not data loss.
 			continue

@@ -136,11 +136,11 @@ func (r *Result) Evaluate(sc *Scenario, expectedFiles int) {
 		case len(a.Partials) > 0:
 			r.Add(CheckArchiveFull, false, "%d unfinished .auros-partial file(s) in an archive that claims "+
 				"to be complete, first: %s", len(a.Partials), a.Partials[0])
-		case a.HashMatches+len(a.DeviationsSeen) < a.Expected:
+		case a.HashMatches+len(a.DeviationsSeen)+a.DeviationsAbsent < a.Expected:
 			r.Add(CheckArchiveFull, false, "only %d of %d files matched by hash", a.HashMatches, a.Expected)
 		default:
 			r.Add(CheckArchiveFull, true, "all %d files exist in two places and the second copy was "+
-				"re-hashed here, file by file", a.Expected)
+				"re-hashed here, file by file (%d deliberately not copied)", a.Expected, a.DeviationsAbsent)
 		}
 	}
 

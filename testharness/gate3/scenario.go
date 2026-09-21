@@ -182,6 +182,10 @@ type Scenario struct {
 	// corpus that points outside it, before the run.
 	PlantSymlinkEscape bool
 
+	// CloudFiles is the --cloud-files choice this run makes. Empty means
+	// hydrate, which is what every other run uses.
+	CloudFiles string
+
 	// DeviatesSource / DeviatesArchive record that this scenario damages the
 	// tree on purpose, so the post-run comparison expects the damage rather than
 	// reporting the harness's own work as the installer's data loss. What
@@ -324,7 +328,7 @@ func Suite() []Scenario {
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseCopy, BP: 100,
 			Action: ActionDeleteSource, TargetDeltaBytes: aheadFar, DeviatesSource: true, Expect: ExpectAbort,
 			AbortEvidence: []string{"source-disappeared"},
-			Why: "Same family, widest possible gap between the acknowledged inventory and the copy.",
+			Why:           "Same family, widest possible gap between the acknowledged inventory and the copy.",
 			WrongReason: "Re-enumerating at copy time instead of using the inventory the user " +
 				"acknowledged would make this pass while quietly breaking phase 2.",
 		},
@@ -451,7 +455,7 @@ func Suite() []Scenario {
 		{
 			ID: "G04", Family: "path_escape", Name: "A link inside the source tree points outside it",
 			Dest: DestNormal, Trigger: TriggerNone, Action: ActionNone, PlantSymlinkEscape: true,
-			Expect: ExpectAbort,
+			Expect:        ExpectAbort,
 			AbortEvidence: []string{"path-escapes-source-root"},
 			Why: "A link in Documents pointing at C:\\Windows is how a copy of a user's files turns into " +
 				"a copy of the operating system, or of a network share, or of itself.",
@@ -490,6 +494,21 @@ func Suite() []Scenario {
 				"between copy and verify breaks here.",
 			WrongReason: "Same as S02: a pass means the installer ignored the wall clock, which is what " +
 				"it is supposed to do.",
+		},
+		{
+			ID: "S05", Family: "cloud_files",
+			Name: "--cloud-files=skip must leave the placeholders where they are",
+			Dest: DestNormal, Trigger: TriggerNone, Action: ActionNone, CloudFiles: "skip",
+			Expect: ExpectSurvive,
+			Why: "SAFETY.md phase 1 makes this the user's choice, in plain words, before anything starts: " +
+				"hydrate them (slow, and they have to fit) or leave them in the cloud. A school's uplink " +
+				"is the reason the choice exists. A tool that asks and then does the other thing has " +
+				"taken a decision the user was told they were making — and it sized the destination for " +
+				"the answer it did not act on.",
+			WrongReason: "The corpus's placeholders are attribute-only: their bytes are on the disk, so " +
+				"reading them succeeds and nothing fails. The only way to tell whether the choice was " +
+				"honoured is to look at whether those files are in the archive, which is what this run " +
+				"does.",
 		},
 		{
 			ID: "S04", Family: "auto_destination", Name: "No --dest at all: the installer must choose a volume that is not the system disk",
