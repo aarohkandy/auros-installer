@@ -97,6 +97,7 @@ type Result struct {
 	Fire       *FireRecord `json:"fire,omitempty"`
 	Deviations []Deviation `json:"deviations,omitempty"`
 
+	Settle     *SettleReport     `json:"settle,omitempty"`
 	SystemDisk *SystemDiskReport `json:"system_disk,omitempty"`
 	Source     *TreeReport       `json:"source,omitempty"`
 	Archive    *TreeReport       `json:"archive,omitempty"`
@@ -301,6 +302,13 @@ func (r *Result) Summary(required []string) string {
 	if r.Archive != nil {
 		fmt.Fprintf(&b, "   archive  : %d present, %d hashed OK, %d corrupted, %d extra, %d partial\n",
 			r.Archive.Present, r.Archive.HashMatches, len(r.Archive.Corrupt), len(r.Archive.Extra), len(r.Archive.Partials))
+	}
+	if r.Settle != nil {
+		fmt.Fprintf(&b, "   settle   : settled=%v after %.0fs (%d polls, %.0fs quiet required)\n",
+			r.Settle.Settled, r.Settle.Seconds, r.Settle.Polls, r.Settle.QuietSeconds)
+		for _, u := range r.Settle.StillChanging {
+			fmt.Fprintf(&b, "              ~ %s\n", u)
+		}
 	}
 	if r.SystemDisk != nil {
 		for _, d := range r.SystemDisk.TopDirs() {

@@ -33,6 +33,10 @@ type RunConfig struct {
 	Seed     uint64
 	Faithful bool
 	Image    string
+
+	// SettleQuiet and SettleMax bound the settle phase; zero means the default.
+	SettleQuiet time.Duration
+	SettleMax   time.Duration
 }
 
 // RunOnce performs one run end to end and returns its evidence.
@@ -87,6 +91,28 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	}
 	if err := GrantFullControl(cfg.WorkDir, cfg.User); err != nil {
 		return nil, err
+	}
+
+	// ── settle: C: must go quiet before the "before" mark is taken ──────────
+	// Done before the harness itself touches C: (destination prep, planted
+	// links), so the only writers it waits out are the machine's own. A machine
+	// that never settles is not measured: C1 fails with why, and nothing runs.
+	quiet, maxWait := cfg.SettleQuiet, cfg.SettleMax
+	if quiet <= 0 {
+		quiet = DefaultSettleQuiet
+	}
+	if maxWait <= 0 {
+		maxWait = DefaultSettleMax
+	}
+	poll, perr := journalPoller("C:")
+	if perr != nil {
+		res.Settle = &SettleReport{QuietSeconds: quiet.Seconds(), Error: perr.Error()}
+	} else {
+		res.Settle = Settle(poll, quiet, maxWait, SettleEvery, time.Now, time.Sleep)
+	}
+	if res.Settle.Why() != "" {
+		res.Evaluate(sc, len(g.ByGolden))
+		return res, nil
 	}
 
 	// ── the destination this scenario runs against ───────────────────────────
@@ -280,6 +306,27 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	res.Findings = append(res.Findings, fidelityFindings(g, res)...)
 	res.Evaluate(sc, len(g.ByGolden))
 	return res, nil
+}
+
+// journalPoller returns a poll for Settle: each call reads the C: change
+// journal since the previous call and returns the changes the noise list does
+// not excuse. No attribution: while settling, every such change counts.
+func journalPoller(letter string) (func() ([]string, error), error) {
+	mark, err := MarkUSN(letter)
+	if err != nil {
+		return nil, err
+	}
+	return func() ([]string, error) {
+		rep, err := DiffUSN(mark, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if rep.Error != "" {
+			return nil, fmt.Errorf("%s", rep.Error)
+		}
+		mark.NextUSN = rep.EndUSN
+		return rep.Unexplained, nil
+	}, nil
 }
 
 // installerArgs is the REAL command line, from cmd/auros-migrate/main.go.

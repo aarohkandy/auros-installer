@@ -23,6 +23,8 @@ func (r *Result) Evaluate(sc *Scenario, expectedFiles int) {
 	// ── C1: the invariant (D27). Nothing was written to the system disk. ──
 	sys := r.SystemDisk
 	switch {
+	case r.Settle != nil && r.Settle.Why() != "":
+		r.Add(CheckSystemDisk, false, "%s", r.Settle.Why())
 	case sys == nil:
 		r.Add(CheckSystemDisk, false, "the system disk was never measured")
 	case sys.Error != "":

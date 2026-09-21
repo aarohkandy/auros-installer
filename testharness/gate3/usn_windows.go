@@ -428,14 +428,6 @@ func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*Syste
 	return rep, nil
 }
 
-func capList(l []string, n int) []string {
-	sort.Strings(l)
-	if len(l) > n {
-		l = append(l[:n:n], fmt.Sprintf("… and %d more", len(l)-n))
-	}
-	return l
-}
-
 func matchesAny(path string, lowered []string) bool {
 	p := strings.ToLower(path)
 	for _, e := range lowered {
