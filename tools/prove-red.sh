@@ -485,7 +485,7 @@ run_case M03 "the re-check after writing stops comparing" \
   ./internal/restore 'TestReVerify_AFileChangedAfterTheWriteIsCaught' \
   'the re-check passed over a file that was changed' m03
 run_case M04 "the plan stops checking that ROUTED targets are inside home" \
-  ./internal/restore 'TestPlan_ARoutingRuleThatLandsOutsideHomeIsRefused' \
+  ./internal/restore 'TestPlan_ARoutedTargetSpelledOutsideHomeIsRefusedEvenIfItLinksBackIn' \
   'want ErrPathEscape' m04
 run_case M04b "the plan stops re-validating the manifest's own paths" \
   ./internal/restore 'TestPlan_APathThatIsNotWhatItClaimsIsRefused' \

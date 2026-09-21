@@ -334,6 +334,29 @@ func TestPlan_ARoutingRuleThatLandsOutsideHomeIsRefused(t *testing.T) {
 	}
 }
 
+// The lexical check's own case. Once the plan also resolved links, a target in
+// /etc was refused by BOTH checks, so disabling the lexical one left the test
+// above green (prove-red M04). The case only it catches: a target spelled
+// outside the home whose directory is a link back INTO the home. The resolved
+// check calls that fine; a routing rule that names a path outside the home is
+// wrong however the disk happens to be linked today.
+func TestPlan_ARoutedTargetSpelledOutsideHomeIsRefusedEvenIfItLinksBackIn(t *testing.T) {
+	_, l := newHome(t)
+	root := t.TempDir()
+	a := buildArchive(t, root, map[string]string{"Documents/ok.txt": "fine"})
+	back := filepath.Join(t.TempDir(), "back-into-home")
+	if err := os.Symlink(l.Home, back); err != nil {
+		t.Skipf("cannot create a link here: %v", err)
+	}
+	rogue := &Router{L: l, override: func(string) (Route, bool) {
+		return Route{Disposition: DispFile, Target: filepath.Join(back, "ok.txt"),
+			DirMode: 0o755, FileMode: 0o644, Bucket: "Documents"}, true
+	}}
+	if _, err := buildPlanWith(a, l, rogue); !errors.Is(err, ErrPathEscape) {
+		t.Fatalf("err = %v, want ErrPathEscape: a target spelled outside the home was planned", err)
+	}
+}
+
 func TestPlan_TwoEntriesWantingOneDestinationIsRefused(t *testing.T) {
 	// Silent data loss wearing a plausible face: the second file overwrites
 	// the first and the count still comes out right.
