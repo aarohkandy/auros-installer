@@ -75,3 +75,43 @@ func TestAttributionFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func keyEv(id int, pid, key, name string) string {
+	nameData := ""
+	if name != "" {
+		nameData = `<Data Name="FileName">` + name + `</Data>`
+	}
+	return fmt.Sprintf(`<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System>`+
+		`<Provider Name="Microsoft-Windows-Kernel-File" /><EventID>%d</EventID>`+
+		`<Execution ProcessID="%s" ThreadID="1" /></System><EventData>`+
+		`<Data Name="Irp">0x1</Data><Data Name="FileObject">0x2</Data><Data Name="FileKey">%s</Data>%s`+
+		`</EventData></Event>`, id, pid, key, nameData)
+}
+
+// Run 35565779074: the Entra broker changed ActivationStore.dat's timestamps
+// through a handle it opened before the trace. No Create; only a keyed event.
+func TestAttributionFollowsWritesThroughHandlesOpenedBeforeTheTrace(t *testing.T) {
+	x := etwXML(
+		fileEv(12, "100", "FileName", cDev+`\gate3\corpus\a.txt`),                           // the installer is traced at all
+		keyEv(32, "4", "0xFFFFA001", cDev+`\ProgramData\AppRepository\ActivationStore.dat`), // the name rundown
+		keyEv(17, "900", "0xFFFFA001", ""),                                                  // SetInformation by the broker
+		keyEv(10, "4", "0xFFFFA002", cDev+`\Windows\auros-held.tmp`),                        // NameCreate
+		keyEv(16, "100", "0xFFFFA002", ""),                                                  // Write by the installer
+		keyEv(17, "900", "0xFFFFA003", ""),                                                  // a key nothing named
+	)
+	a := ParseTrace(strings.NewReader(x), cDev, []uint32{100}, map[uint32]string{900: "BrokerPlugin.exe"})
+	if a.Err != "" {
+		t.Fatalf("attribution failed: %s", a.Err)
+	}
+	for path, want := range map[string]string{
+		`C:\ProgramData\AppRepository\ActivationStore.dat`: Background,
+		`C:\Windows\auros-held.tmp`:                        ByInstaller,
+	} {
+		if got, who := a.Classify(path); got != want {
+			t.Errorf("%s: got %s (%s), want %s", path, got, who, want)
+		}
+	}
+	if len(a.Unresolved) != 1 || !strings.Contains(a.Unresolved[0], "0xffffa003") {
+		t.Errorf("an unnamed handle write must be kept as evidence, got %v", a.Unresolved)
+	}
+}

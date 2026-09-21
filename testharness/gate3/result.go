@@ -171,6 +171,9 @@ type SystemDiskReport struct {
 	// installer's tree opened those paths — named, per run, not a standing rule.
 	Attribution string   `json:"attribution"`
 	Background  []string `json:"background_changes,omitempty"`
+	// TraceNotes is the trace's own evidence when a change stayed unattributed:
+	// handle-based writes whose file it could not name, and the event schemas.
+	TraceNotes []string `json:"trace_notes,omitempty"`
 	// Wrapped is the fail-closed case: the journal overwrote records before we
 	// read them, so the window cannot be accounted for and the run cannot claim
 	// the invariant held.
@@ -308,6 +311,9 @@ func (r *Result) Summary(required []string) string {
 		fmt.Fprintf(&b, "   attrib.  : %s\n", r.SystemDisk.Attribution)
 		for _, u := range r.SystemDisk.Background {
 			fmt.Fprintf(&b, "              ~ %s\n", u)
+		}
+		for _, u := range r.SystemDisk.TraceNotes {
+			fmt.Fprintf(&b, "              ? %s\n", u)
 		}
 		for i, u := range r.SystemDisk.Unexplained {
 			if i >= 20 {

@@ -15,16 +15,20 @@ import (
 // Two ETW sessions, driven by the inbox logman and tracerpt, so the harness
 // needs nothing installed. See attrib.go for what the trace is for.
 //
-// Kernel-File keywords: 0x10 FILENAME, 0x80 CREATE, 0x400 DELETE_PATH,
-// 0x800 RENAME_SETLINK_PATH, 0x1000 CREATE_NEW_FILE. No READ or WRITE: the
-// opener is what attribution needs, and 18,000 files of read/write events would
-// only slow tracerpt down. Kernel-Process 0x10 is WINEVENT_KEYWORD_PROCESS.
-// `logman query providers <name>` is printed by StartTrace so the keyword
-// table the runner actually has is in every job log.
+// Kernel-File keywords, as `logman query providers` printed them on the runner
+// (run 35565779074): 0x10 FILENAME, 0x20 FILEIO (SetInformation, SetDelete,
+// Rename), 0x80 CREATE, 0x200 WRITE, 0x400 DELETE_PATH, 0x800
+// RENAME_SETLINK_PATH, 0x1000 CREATE_NEW_FILE. No READ. FILEIO and WRITE are
+// there for writes through handles opened before the trace (see attrib.go).
+// Kernel-Process 0x10 is WINEVENT_KEYWORD_PROCESS.
 var traceProviders = []struct{ session, provider, keywords string }{
-	{"gate3-file", "Microsoft-Windows-Kernel-File", "0x1C90"},
+	{"gate3-file", "Microsoft-Windows-Kernel-File", "0x1EB0"},
 	{"gate3-proc", "Microsoft-Windows-Kernel-Process", "0x10"},
 }
+
+// Microsoft-Windows-Kernel-File, as `logman query providers` printed it.
+var kernelFileGUID = syscall.GUID{Data1: 0xEDD08927, Data2: 0x9CC4, Data3: 0x4E65,
+	Data4: [8]byte{0xB9, 0x70, 0xC2, 0x56, 0x0F, 0xB5, 0xC2, 0x89}}
 
 // Trace is a running pair of ETW sessions.
 type Trace struct {
@@ -50,6 +54,12 @@ func StartTrace(dir string) (*Trace, error) {
 		}
 		t.etls = append(t.etls, etl)
 	}
+	// Ask Kernel-File to name what is already open, so a write through a handle
+	// that predates the trace can be tied to a path. If the provider has no
+	// rundown this names nothing, those writes stay unattributed, and they fail.
+	if err := captureState("gate3-file", &kernelFileGUID, 0x1EB0); err != nil {
+		fmt.Printf("gate3: Kernel-File name rundown not requested: %v\n", err)
+	}
 	return t, nil
 }
 
@@ -63,6 +73,19 @@ func (t *Trace) Stop() {
 // Attribute stops the trace, renders it and parses it. It never returns nil:
 // a failure is an Attribution whose Err says why, and the caller fails closed.
 func (t *Trace) Attribute(roots []uint32) *Attribution {
+	// A lost event could hide an installer write behind someone else's, so a
+	// session that dropped anything cannot vouch for the window.
+	for _, p := range traceProviders {
+		lost, err := eventsLost(p.session)
+		if err != nil {
+			t.Stop()
+			return &Attribution{Err: fmt.Sprintf("querying %s: %v", p.session, err)}
+		}
+		if lost > 0 {
+			t.Stop()
+			return &Attribution{Err: fmt.Sprintf("the %s session lost %d events or buffers", p.session, lost)}
+		}
+	}
 	t.Stop()
 	xmlPath := filepath.Join(t.dir, "trace.xml")
 	os.Remove(xmlPath)
@@ -131,4 +154,80 @@ func runningImages() map[uint32]string {
 		}
 	}
 	return m
+}
+
+var (
+	procControlTraceW  = modadvapi32.NewProc("ControlTraceW")
+	procEnableTraceEx2 = modadvapi32.NewProc("EnableTraceEx2")
+)
+
+// eventTraceProperties is EVENT_TRACE_PROPERTIES (evntrace.h), 120 bytes on
+// amd64, followed by room for the two names ControlTrace writes back.
+type eventTraceProperties struct {
+	BufferSize          uint32 // WNODE_HEADER from here
+	ProviderID          uint32
+	HistoricalContext   uint64
+	TimeStamp           int64
+	GUID                syscall.GUID
+	ClientContext       uint32
+	Flags               uint32
+	BufferSizeKB        uint32 // EVENT_TRACE_PROPERTIES from here
+	MinimumBuffers      uint32
+	MaximumBuffers      uint32
+	MaximumFileSize     uint32
+	LogFileMode         uint32
+	FlushTimer          uint32
+	EnableFlags         uint32
+	AgeLimit            int32
+	NumberOfBuffers     uint32
+	FreeBuffers         uint32
+	EventsLost          uint32
+	BuffersWritten      uint32
+	LogBuffersLost      uint32
+	RealTimeBuffersLost uint32
+	LoggerThreadID      uintptr
+	LogFileNameOffset   uint32
+	LoggerNameOffset    uint32
+	names               [2048]uint16
+}
+
+func querySession(name string) (*eventTraceProperties, error) {
+	n, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, err
+	}
+	p := &eventTraceProperties{}
+	p.BufferSize = uint32(unsafe.Sizeof(*p))
+	p.LoggerNameOffset = uint32(unsafe.Offsetof(p.names))
+	p.LogFileNameOffset = p.LoggerNameOffset + 1024*2
+	const eventTraceControlQuery = 0
+	if r, _, _ := procControlTraceW.Call(0, uintptr(unsafe.Pointer(n)), uintptr(unsafe.Pointer(p)),
+		eventTraceControlQuery); r != 0 {
+		return nil, syscall.Errno(r)
+	}
+	return p, nil
+}
+
+func eventsLost(session string) (uint32, error) {
+	p, err := querySession(session)
+	if err != nil {
+		return 0, err
+	}
+	return p.EventsLost + p.LogBuffersLost + p.RealTimeBuffersLost, nil
+}
+
+// captureState is EnableTraceEx2(EVENT_CONTROL_CODE_CAPTURE_STATE). The 64-bit
+// handle and keyword are passed as single registers: amd64 only, which is the
+// only architecture gate3.exe is built for.
+func captureState(session string, provider *syscall.GUID, keywords uint64) error {
+	p, err := querySession(session)
+	if err != nil {
+		return err
+	}
+	const eventControlCodeCaptureState = 2
+	if r, _, _ := procEnableTraceEx2.Call(uintptr(p.HistoricalContext), uintptr(unsafe.Pointer(provider)),
+		eventControlCodeCaptureState, 5, uintptr(keywords), 0, 0, 0); r != 0 {
+		return syscall.Errno(r)
+	}
+	return nil
 }

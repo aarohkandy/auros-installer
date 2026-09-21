@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aarohkandy/auros-installer/testharness/fault"
@@ -348,7 +349,18 @@ func cmdProveRed(args []string) error {
 	//    not have seen it at all.
 	//    The ETW trace runs across it with THIS process as the installer's
 	//    root: attribution must name the probe's writer and must not excuse it.
+	//    A second probe is written through a handle opened BEFORE the trace
+	//    started, the way a long-running service writes (run 35565779074: the
+	//    Entra broker's ActivationStore.dat, basic-info-change only, no open in
+	//    the window). It must be attributed too, or such writes stay unattributed.
 	fmt.Print(gate3.ProviderKeywords())
+	handleProbe := `C:\auros-gate3-prove-red-handle.tmp`
+	hp, err := os.OpenFile(handleProbe, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(handleProbe)
+	defer hp.Close()
 	trace, err := gate3.StartTrace(filepath.Join(os.TempDir(), "gate3-prove-red-etw"))
 	if err != nil {
 		return err
@@ -365,9 +377,20 @@ func cmdProveRed(args []string) error {
 	if err := os.Remove(probe); err != nil {
 		return err
 	}
+	if _, err := hp.Write([]byte("written through a handle that predates the trace\n")); err != nil {
+		return err
+	}
+	ft := syscall.NsecToFiletime(time.Now().Add(-time.Hour).UnixNano())
+	if err := syscall.SetFileTime(syscall.Handle(hp.Fd()), nil, nil, &ft); err != nil {
+		return err
+	}
+	hp.Close()
 	time.Sleep(2 * time.Second)
 	attr := trace.Attribute([]uint32{uint32(os.Getpid())})
 	fmt.Printf("trace events: %v\n", attr.Events)
+	for id, fields := range attr.Schema {
+		fmt.Printf("schema Kernel-File/%s: %s\n", id, fields)
+	}
 	rep, err := gate3.DiffUSN(mark, nil, attr)
 	if err != nil {
 		return err
@@ -389,6 +412,20 @@ func cmdProveRed(args []string) error {
 	}
 	if found && !attributed {
 		return fmt.Errorf("the probe was reported but not attributed to the process that wrote it")
+	}
+	handleLine := ""
+	for _, u := range append(append([]string{}, rep.Unexplained...), rep.Background...) {
+		if strings.Contains(strings.ToLower(u), "auros-gate3-prove-red-handle.tmp") {
+			handleLine = u
+		}
+	}
+	fmt.Printf("the handle probe: %s\n", handleLine)
+	for _, n := range rep.TraceNotes {
+		fmt.Printf("   ? %s\n", n)
+	}
+	if !strings.Contains(handleLine, "installer's process tree") {
+		return fmt.Errorf("a write through a handle opened before the trace was not attributed to its "+
+			"writer (%q): writes like that on a clean run stay unattributed and fail", handleLine)
 	}
 	if !found {
 		return fmt.Errorf("THE SYSTEM-DISK CHECK DID NOT NOTICE a file created and deleted on C: "+

@@ -394,6 +394,12 @@ func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*Syste
 		}
 		rep.Unexplained = append(rep.Unexplained, line)
 	}
+	if attr != nil && len(rep.Unexplained) > 0 {
+		rep.TraceNotes = capList(append([]string{}, attr.Unresolved...), 50)
+		for id, fields := range attr.Schema {
+			rep.TraceNotes = append(rep.TraceNotes, "schema Kernel-File/"+id+": "+fields)
+		}
+	}
 	rep.Unexplained = capList(rep.Unexplained, 200)
 	rep.Background = capList(rep.Background, 200)
 	rep.topDirs = topDirs(byDir, 25)
