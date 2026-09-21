@@ -115,3 +115,43 @@ func TestAttributionFollowsWritesThroughHandlesOpenedBeforeTheTrace(t *testing.T
 		t.Errorf("an unnamed handle write must be kept as evidence, got %v", a.Unresolved)
 	}
 }
+
+func TestClassifyAnyUsesEveryNameAChangeHad(t *testing.T) {
+	// Run 35569388666 G05: AppX renamed the package directory into
+	// WindowsApps\Deleted\ and deleted its files there; the journal names the
+	// file under the old directory, the trace under the new one.
+	x := etwXML(
+		fileEv(12, "100", "FileName", cDev+`\gate3\corpus\a.txt`),
+		fileEv(26, "900", "FilePath", cDev+`\Program Files\WindowsApps\Deleted\Pkg_1abc\AppxManifest.xml`),
+		fileEv(12, "100", "FileName", cDev+`\Windows\mine.tmp`),
+	)
+	a := ParseTrace(strings.NewReader(x), cDev, []uint32{100}, nil)
+	old := `C:\Program Files\WindowsApps\Pkg\AppxManifest.xml`
+	if k, _ := a.Classify(old); k != Unattributed {
+		t.Fatalf("setup: the old name alone should be unattributed, got %s", k)
+	}
+	if k, _ := a.ClassifyAny([]string{old, `C:\Program Files\WindowsApps\Deleted\Pkg_1abc\AppxManifest.xml`}); k != Background {
+		t.Errorf("the change's other name was traced, got %s", k)
+	}
+	if k, _ := a.ClassifyAny([]string{`C:\x\mine.tmp`, `C:\Windows\mine.tmp`}); k != ByInstaller {
+		t.Errorf("the installer on any name must win, got %s", k)
+	}
+	if k, _ := a.ClassifyAny([]string{old, `C:\nowhere\AppxManifest.xml`}); k != Unattributed {
+		t.Errorf("no traced name must stay unattributed, got %s", k)
+	}
+	if s := a.SameName(old); len(s) != 1 {
+		t.Errorf("same-name evidence: %v", s)
+	}
+}
+
+func TestAdmxEnabledValueIsReadNotAssumed(t *testing.T) {
+	admx := `<policy name="Other" key="k" valueName="v"><enabledValue><decimal value="9" /></enabledValue></policy>
+<policy name="DisableAutoInstall" class="Machine" key="Software\Policies\Microsoft\WindowsStore" valueName="AutoDownload">
+  <enabledValue><decimal value="2" /></enabledValue><disabledValue><decimal value="4" /></disabledValue></policy>`
+	if v, err := admxEnabledDecimal(admx, "DisableAutoInstall"); err != nil || v != 2 {
+		t.Errorf("got %d, %v", v, err)
+	}
+	if _, err := admxEnabledDecimal(admx, "Missing"); err == nil {
+		t.Error("a missing policy must not yield a value")
+	}
+}

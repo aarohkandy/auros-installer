@@ -450,5 +450,35 @@ func Quiesce() []string {
 		_ = out
 		did = append(did, fmt.Sprintf("task    %-60s disabled", task))
 	}
+	did = append(did, storeAutoUpdateOff())
 	return did
+}
+
+// storeAutoUpdateOff sets the Group Policy "Turn off Automatic Download and
+// Install of updates" (Windows Components > Store; registry key
+// Software\Policies\Microsoft\WindowsStore, value AutoDownload, ADMX
+// WindowsStore.admx — Microsoft Learn, Policy CSP ApplicationManagement,
+// AllowAppStoreAutoUpdate). Run 35569388666's G05 measured the AppX deployment
+// replacing Microsoft.SecHealthUI in C:\Program Files\WindowsApps mid-run.
+//
+// Microsoft's page names the key and value but not the number the enabled
+// policy writes, so it is read from the runner's own WindowsStore.admx rather
+// than assumed. AppXSvc is deliberately NOT disabled: Microsoft documents that
+// Store applications then do not deploy, and the migration account's first
+// logon provisions them.
+func storeAutoUpdateOff() string {
+	admx, err := os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "PolicyDefinitions", "WindowsStore.admx"))
+	if err != nil {
+		return "policy  Store auto-update: WindowsStore.admx unreadable, not set: " + err.Error()
+	}
+	v, err := admxEnabledDecimal(string(admx), "DisableAutoInstall")
+	if err != nil {
+		return "policy  Store auto-update: not set: " + err.Error()
+	}
+	out, err := exec.Command("reg", "add", `HKLM\SOFTWARE\Policies\Microsoft\WindowsStore`, "/v", "AutoDownload",
+		"/t", "REG_DWORD", "/d", fmt.Sprint(v), "/f").CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("policy  Store auto-update: reg add failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return fmt.Sprintf("policy  Store auto-update off (WindowsStore\\AutoDownload=%d, DisableAutoInstall's enabledValue in WindowsStore.admx)", v)
 }

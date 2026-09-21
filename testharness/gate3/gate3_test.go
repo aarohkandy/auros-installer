@@ -577,6 +577,8 @@ func TestNoiseListNeverExcusesAnywhereTheInstallerMightWrite(t *testing.T) {
 		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum\payload.dll`,
 		`C:\Windows\CbsTemp\31279493_2394330146\scratch\ActionList.xml`,
 		`C:\Windows\WindowsUpdate.log.auros`,
+		`C:\Windows\System32\wbem\Repository\auros.dat`,
+		`C:\Windows\System32\wbem\auros.mof`,
 	}
 	for _, p := range mustNotBeNoise {
 		if ok, rule := IsNoise(p); ok {
@@ -601,6 +603,7 @@ func TestNoiseListNeverExcusesAnywhereTheInstallerMightWrite(t *testing.T) {
 		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum\ServerTargetCompDB_zh-tw.xml`,
 		`C:\Windows\CbsTemp\{24C2F83F-4420-40C0-B8D7-2A677196947D}`,
 		`C:\Windows\WindowsUpdate.log`,
+		`C:\Windows\System32\wbem\Repository\MAPPING2.MAP`,
 	}
 	for _, p := range mustBeNoise {
 		if ok, _ := IsNoise(p); !ok {

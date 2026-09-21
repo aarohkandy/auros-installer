@@ -87,6 +87,13 @@ var noiseRules = []NoiseRule{
 		Why: "Component-Based Servicing (TiWorker.exe, the TrustedInstaller service) enumerating Features " +
 			"on Demand into a session folder and deleting it again. Only the session folder, its " +
 			"LocalFoDEnum subfolder, the XML files CBS names there and CBS's {GUID} rename target match"},
+	// Run 35569388666 clean-0-0: MAPPING2.MAP [data-overwrite,data-extend] with
+	// no open and no handle write in the trace. The WMI repository is written
+	// through a mapped view (flushed by the memory manager, not a Write IRP), so
+	// attribution cannot see it; the installer's own manage-bde status read is a
+	// WMI client. Exactly the CIM repository's files, nothing else in wbem.
+	{Pattern: `^c:\\windows\\system32\\wbem\\repository\\(mapping[1-3]\.map|objects\.data|index\.btr)$`,
+		Why: "the WMI CIM repository (winmgmt), written through a memory-mapped view"},
 	{Pattern: `^c:\\windows\\windowsupdate\.log$`,
 		Why: "the Windows Update agent's legacy log file, written by the same scan"},
 	{Pattern: `^c:\\windows\\system32\\tasks\\microsoft\\windows\\`,
