@@ -177,3 +177,30 @@ func TestNetworkHost_RefusesAnythingItWouldHaveToInvent(t *testing.T) {
 		}
 	}
 }
+
+// The Windows half writes with Render and the Linux half reads with Parse. A
+// field carrying a framing character must not shift the columns, and a row
+// with no name must not make Parse refuse the whole file.
+func TestRender_RoundTripsThroughParse(t *testing.T) {
+	in := []Printer{
+		{Name: "Office\tLaser", Port: "IP_10.0.0.5", Driver: "HP Universal\r\nPCL 6", Default: true, Location: "Room 4", Comment: "a\tb"},
+		{Name: "  ", Port: "USB001"},
+		{Name: "Library", Port: `\\srv\lib`},
+	}
+	got, err := Parse(Render(in))
+	if err != nil {
+		t.Fatalf("Parse(Render(...)): %v", err)
+	}
+	want := []Printer{
+		{Name: "Office Laser", Port: "IP_10.0.0.5", Driver: "HP Universal  PCL 6", Default: true, Location: "Room 4", Comment: "a b"},
+		{Name: "Library", Port: `\\srv\lib`},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d printers, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
