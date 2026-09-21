@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,27 @@ import (
 // covered, and for every process; attribution is strictly narrower. A lost ETW
 // event can only turn a change into "unattributed", which fails.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// admxEnabledDecimal reads <enabledValue><decimal value="N"/> from the named
+// policy in an ADMX file, so a policy is set to the value Windows itself defines.
+func admxEnabledDecimal(admx, policy string) (uint32, error) {
+	start := strings.Index(admx, `name="`+policy+`"`)
+	if start < 0 {
+		return 0, fmt.Errorf("policy %s not in the ADMX", policy)
+	}
+	rest := admx[start:]
+	if end := strings.Index(rest, "</policy>"); end >= 0 {
+		rest = rest[:end]
+	}
+	m := admxEnabled.FindStringSubmatch(rest)
+	if m == nil {
+		return 0, fmt.Errorf("policy %s has no decimal enabledValue", policy)
+	}
+	v, err := strconv.ParseUint(m[1], 10, 32)
+	return uint32(v), err
+}
+
+var admxEnabled = regexp.MustCompile(`<enabledValue>\s*<decimal\s+value="(\d+)"\s*/>`)
 
 // Attribution is one trace, parsed.
 type Attribution struct {
@@ -283,6 +305,45 @@ func (a *Attribution) Classify(cPath string) (kind, who string) {
 		return ByInstaller, "opened by the installer's process tree: " + strings.Join(mine, ", ")
 	}
 	return Background, "opened only by " + strings.Join(others, ", ")
+}
+
+// ClassifyAny classifies one change known by several paths (see candidates in
+// usn_windows.go): the installer on any of them wins, then any background
+// writer; only a change no path of which the trace saw is unattributed.
+func (a *Attribution) ClassifyAny(paths []string) (kind, who string) {
+	kind, who = Unattributed, "no process in the trace opened it or wrote to it"
+	for _, p := range paths {
+		k, w := a.Classify(p)
+		if len(paths) > 1 && k != Unattributed {
+			w += " (as " + p + ")"
+		}
+		switch {
+		case k == ByInstaller:
+			return k, w
+		case k == Background && kind == Unattributed:
+			kind, who = k, w
+		}
+	}
+	return kind, who
+}
+
+// SameName lists traced C: paths ending in the same file name, as evidence
+// for a change that stayed unattributed.
+func (a *Attribution) SameName(cPath string) []string {
+	base := strings.ToLower(cPath[strings.LastIndex(cPath, `\`)+1:])
+	var out []string
+	for p, pids := range a.opens {
+		if strings.HasSuffix(p, `\`+base) && len(out) < 5 {
+			var ids []string
+			for pid := range pids {
+				ids = append(ids, fmt.Sprintf("%s(%d)", a.image(pid), pid))
+			}
+			sort.Strings(ids)
+			out = append(out, "C:"+p+" by "+strings.Join(ids, ","))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (a *Attribution) image(pid uint32) string {

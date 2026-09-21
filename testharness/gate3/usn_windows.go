@@ -296,6 +296,7 @@ func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*Syste
 	// reports them — which is how a noise list grows until it covers the thing
 	// it was supposed to catch.
 	type rec struct {
+		ref    uint64
 		parent uint64
 		name   string
 		reason uint32
@@ -347,7 +348,8 @@ func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*Syste
 			if usn >= end.NextUSN {
 				continue
 			}
-			records = append(records, rec{parent: parentRef, name: name, reason: reason})
+			resolver.alias(fileRef, parentRef, name)
+			records = append(records, rec{ref: fileRef, parent: parentRef, name: name, reason: reason})
 		}
 		if newNext <= next {
 			break
@@ -357,6 +359,7 @@ func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*Syste
 
 	byDir := map[string]int{}
 	unexplained := map[string]uint32{}
+	refOf := map[string]uint64{}
 	for _, r := range records {
 		rep.Records++
 		full := resolver.resolve(r.parent, r.name)
@@ -370,6 +373,7 @@ func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*Syste
 			continue
 		}
 		unexplained[full] |= r.reason
+		refOf[full] = r.ref
 	}
 
 	switch {
@@ -382,10 +386,17 @@ func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*Syste
 		rep.Attribution = "on: a change is excused only if processes outside the installer's tree, and " +
 			"none inside it, opened the path (ETW Kernel-File)"
 	}
+	var unattributed []string
 	for p, reason := range unexplained {
 		line := fmt.Sprintf("%s [%s]", p, reasonString(reason))
 		if attr != nil {
-			kind, who := attr.Classify(p)
+			// Every name the file and its ancestors had in the window: a trace
+			// path taken after a directory was renamed (AppX moves a package
+			// to WindowsApps\Deleted\ before deleting it) is the same file.
+			kind, who := attr.ClassifyAny(resolver.candidates(refOf[p], p))
+			if kind == Unattributed {
+				unattributed = append(unattributed, p)
+			}
 			line += " — " + who
 			if kind == Background {
 				rep.Background = append(rep.Background, line)
@@ -396,6 +407,17 @@ func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*Syste
 	}
 	if attr != nil && len(rep.Unexplained) > 0 {
 		rep.TraceNotes = capList(append([]string{}, attr.Unresolved...), 50)
+		n := 0
+		sort.Strings(unattributed)
+		for _, p := range unattributed {
+			if n >= 20 {
+				break
+			}
+			if same := attr.SameName(p); len(same) > 0 {
+				n++
+				rep.TraceNotes = append(rep.TraceNotes, "same name in trace as "+p+": "+strings.Join(same, "; "))
+			}
+		}
 		for id, fields := range attr.Schema {
 			rep.TraceNotes = append(rep.TraceNotes, "schema Kernel-File/"+id+": "+fields)
 		}
@@ -463,9 +485,10 @@ func topDirs(m map[string]int, n int) []string {
 // resolver falls back to the reference number, which still lands OUTSIDE every
 // noise rule and so is reported rather than excused — failing closed.
 type pathResolver struct {
-	v     *usnVolume
-	cache map[uint64]string
-	known map[uint64]struct {
+	v       *usnVolume
+	aliases map[uint64][][2]string // ref -> every (parent ref, name) the journal gave it
+	cache   map[uint64]string
+	known   map[uint64]struct {
 		parent uint64
 		name   string
 	}
@@ -476,7 +499,7 @@ func newPathResolver(v *usnVolume) *pathResolver {
 	// read. Without the privilege the open fails on directories the harness
 	// account cannot traverse, and the change resolves to nothing.
 	_ = enablePrivilege("SeBackupPrivilege")
-	return &pathResolver{v: v, cache: map[uint64]string{}, known: map[uint64]struct {
+	return &pathResolver{v: v, aliases: map[uint64][][2]string{}, cache: map[uint64]string{}, known: map[uint64]struct {
 		parent uint64
 		name   string
 	}{}}
@@ -494,6 +517,61 @@ func (r *pathResolver) learn(ref, parent uint64, name string) {
 			name   string
 		}{parent: parent, name: name}
 	}
+}
+
+// alias records one (parent, name) a file or directory had in the window.
+func (r *pathResolver) alias(ref, parent uint64, name string) {
+	if name == "" || ref == 0 {
+		return
+	}
+	a := [2]string{fmt.Sprint(parent), name}
+	for _, x := range r.aliases[ref] {
+		if x == a {
+			return
+		}
+	}
+	r.aliases[ref] = append(r.aliases[ref], a)
+}
+
+// candidates is every path a changed file could have had during the window:
+// each of its names under each name its ancestors had. Capped, and always
+// including the primary path.
+func (r *pathResolver) candidates(ref uint64, primary string) []string {
+	out := []string{primary}
+	seen := map[string]bool{strings.ToLower(primary): true}
+	for _, a := range r.aliases[ref] {
+		var parent uint64
+		fmt.Sscan(a[0], &parent)
+		for _, d := range r.dirNames(parent, 0) {
+			p := strings.TrimRight(d, `\`) + `\` + a[1]
+			if !seen[strings.ToLower(p)] && len(out) < 32 {
+				seen[strings.ToLower(p)] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+// dirNames is every path a directory had in the window.
+func (r *pathResolver) dirNames(ref uint64, depth int) []string {
+	if ref == 0 || depth > 64 {
+		return nil
+	}
+	var out []string
+	if p := r.dirOf(ref, 0); p != "" {
+		out = append(out, p)
+	}
+	for _, a := range r.aliases[ref] {
+		var parent uint64
+		fmt.Sscan(a[0], &parent)
+		for _, d := range r.dirNames(parent, depth+1) {
+			if len(out) < 32 {
+				out = append(out, strings.TrimRight(d, `\`)+`\`+a[1])
+			}
+		}
+	}
+	return out
 }
 
 func (r *pathResolver) resolve(parentRef uint64, name string) string {
