@@ -127,7 +127,11 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 		res.Pin = &pin
 	}
 
-	// ── the invariant's opening mark ─────────────────────────────────────────
+	// ── the invariant's opening mark, and the trace that attributes it ───────
+	trace, terr := StartTrace(filepath.Join(cfg.WorkDir, "etw-"+cfg.RunID))
+	if terr == nil {
+		defer trace.Stop()
+	}
 	mark, merr := MarkUSN("C:")
 	if merr != nil {
 		res.SystemDisk = &SystemDiskReport{Error: merr.Error(), Exclusions: NoiseRules(), ExclusionSHA: NoiseSHA()}
@@ -194,7 +198,11 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	in.Release()
 
 	if merr == nil {
-		rep, derr := DiffUSN(mark, injectedPaths(devs, cfg))
+		attr := &Attribution{Err: fmt.Sprintf("the trace did not start: %v", terr)}
+		if terr == nil {
+			attr = trace.Attribute([]uint32{proc.PID()})
+		}
+		rep, derr := DiffUSN(mark, injectedPaths(devs, cfg), attr)
 		if derr != nil && rep == nil {
 			rep = &SystemDiskReport{Error: derr.Error()}
 		}

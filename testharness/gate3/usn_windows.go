@@ -235,8 +235,11 @@ type Change struct {
 }
 
 // DiffUSN reads every journal record between two marks and returns the changes,
-// split into the ones the noise list excuses and the ones it does not.
-func DiffUSN(start USNMark, extraExclusions []string) (*SystemDiskReport, error) {
+// split into the ones the noise list excuses and the ones it does not. With an
+// attribution (attrib.go), a change the noise list does not excuse is excused
+// only if processes outside the installer's tree, and no process inside it,
+// opened that path; a nil or failed attribution excuses nothing.
+func DiffUSN(start USNMark, extraExclusions []string, attr *Attribution) (*SystemDiskReport, error) {
 	rep := &SystemDiskReport{
 		Method:       "ntfs change journal (FSCTL_READ_USN_JOURNAL), every record between two USNs",
 		JournalID:    start.JournalID,
@@ -369,16 +372,40 @@ func DiffUSN(start USNMark, extraExclusions []string) (*SystemDiskReport, error)
 		unexplained[full] |= r.reason
 	}
 
+	switch {
+	case attr == nil:
+		rep.Attribution = "off: no trace was taken, so every change the noise list does not excuse fails"
+	case attr.Err != "":
+		rep.Attribution = "off, failing closed: " + attr.Err
+		attr = nil
+	default:
+		rep.Attribution = "on: a change is excused only if processes outside the installer's tree, and " +
+			"none inside it, opened the path (ETW Kernel-File)"
+	}
 	for p, reason := range unexplained {
-		rep.Unexplained = append(rep.Unexplained, fmt.Sprintf("%s [%s]", p, reasonString(reason)))
+		line := fmt.Sprintf("%s [%s]", p, reasonString(reason))
+		if attr != nil {
+			kind, who := attr.Classify(p)
+			line += " — " + who
+			if kind == Background {
+				rep.Background = append(rep.Background, line)
+				continue
+			}
+		}
+		rep.Unexplained = append(rep.Unexplained, line)
 	}
-	sort.Strings(rep.Unexplained)
-	if len(rep.Unexplained) > 200 {
-		extra := len(rep.Unexplained) - 200
-		rep.Unexplained = append(rep.Unexplained[:200:200], fmt.Sprintf("… and %d more", extra))
-	}
+	rep.Unexplained = capList(rep.Unexplained, 200)
+	rep.Background = capList(rep.Background, 200)
 	rep.topDirs = topDirs(byDir, 25)
 	return rep, nil
+}
+
+func capList(l []string, n int) []string {
+	sort.Strings(l)
+	if len(l) > n {
+		l = append(l[:n:n], fmt.Sprintf("… and %d more", len(l)-n))
+	}
+	return l
 }
 
 func matchesAny(path string, lowered []string) bool {
