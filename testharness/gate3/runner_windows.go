@@ -93,6 +93,23 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 		return nil, err
 	}
 
+	// ── log the migration user on BEFORE settling ────────────────────────────
+	// A logon and profile load wake Windows' own per-user machinery (the Entra
+	// broker rewrites AppRepository\...\ActivationStore.dat). When this happened
+	// after the "before" mark, every clean run showed those writes as unexplained
+	// C: changes (runs 35632029937, 35596591968). The logon is harness setup, not
+	// the installer, so its side effects belong in the settle window, and only the
+	// installer runs between the marks.
+	sess, err := LogonMigrationUser(cfg.User, cfg.Password)
+	if err != nil {
+		return nil, err
+	}
+	// Never unload: the profile must stay loaded for the whole job so the
+	// account's registry hive stays out of the corpus. See KeepProfileLoaded.
+	sess.KeepProfileLoaded()
+	defer sess.Close()
+	res.Elevated = sess.Elevated
+
 	// ── settle: C: must go quiet before the "before" mark is taken ──────────
 	// Done before the harness itself touches C: (destination prep, planted
 	// links), so the only writers it waits out are the machine's own. A machine
@@ -208,16 +225,6 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	args := installerArgs(destDir, cloudFiles(sc))
 	res.ToolArgs = args
 	outPath := filepath.Join(cfg.WorkDir, "installer-"+cfg.RunID+".out")
-
-	sess, err := LogonMigrationUser(cfg.User, cfg.Password)
-	if err != nil {
-		return nil, err
-	}
-	// Never unload: the profile must stay loaded for the whole job so the
-	// account's registry hive stays out of the corpus. See KeepProfileLoaded.
-	sess.KeepProfileLoaded()
-	defer sess.Close()
-	res.Elevated = sess.Elevated
 
 	started := time.Now()
 	proc, err := StartInstaller(sess, cfg.Tool, args, outPath, cfg.WorkDir)
