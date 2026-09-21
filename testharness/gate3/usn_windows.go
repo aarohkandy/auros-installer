@@ -5,6 +5,7 @@ package gate3
 import (
 	"encoding/binary"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
 	"syscall"
@@ -125,12 +126,25 @@ func EnlargeJournal(letter string, maxSize, delta uint64) error {
 		return err
 	}
 	defer v.Close()
-	var in [16]byte
-	binary.LittleEndian.PutUint64(in[0:8], maxSize)
-	binary.LittleEndian.PutUint64(in[8:16], delta)
+	// A struct with uint64 fields, not a [16]byte: CREATE_USN_JOURNAL_DATA is two
+	// DWORDLONGs and the file system rejects a buffer that is not aligned for
+	// them with ERROR_INVALID_USER_BUFFER, which is what a byte array gets.
+	var in struct{ MaximumSize, AllocationDelta uint64 }
+	in.MaximumSize, in.AllocationDelta = maxSize, delta
 	var ret uint32
-	if err := syscall.DeviceIoControl(v.h, fsctlCreateUSNJournal, &in[0], uint32(len(in)), nil, 0, &ret, nil); err != nil {
-		return fmt.Errorf("gate3: FSCTL_CREATE_USN_JOURNAL on %s: %w", letter, err)
+	err = syscall.DeviceIoControl(v.h, fsctlCreateUSNJournal, (*byte)(unsafe.Pointer(&in)),
+		uint32(unsafe.Sizeof(in)), nil, 0, &ret, nil)
+	if err == nil {
+		return nil
+	}
+	// Fall back to the tool Windows ships for this. The journal's SIZE is
+	// plumbing, not evidence: a wrap is detected and fails the check either way,
+	// and this only removes capacity as a reason for one.
+	out, ferr := exec.Command("fsutil", "usn", "createjournal",
+		fmt.Sprintf("m=%d", maxSize), fmt.Sprintf("a=%d", delta), letter).CombinedOutput()
+	if ferr != nil {
+		return fmt.Errorf("gate3: FSCTL_CREATE_USN_JOURNAL on %s: %v; fsutil also failed: %v: %s",
+			letter, err, ferr, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

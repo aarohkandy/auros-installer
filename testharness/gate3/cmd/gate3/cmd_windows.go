@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -149,13 +150,25 @@ func cmdPrepare(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := gate3.WarmProfile(sess, *work); err != nil {
-		return err
-	}
+	env, werr := gate3.WarmProfile(sess, *work, *corpus)
 	fmt.Printf("migration account %s ready (elevated token: %v, SID %s)\n", *user, sess.Elevated, sess.SID)
 	fmt.Println("known folders redirected to the corpus:")
-	for k, v := range folders {
-		fmt.Printf("  %-40s %s\n", k, v)
+	keys := make([]string, 0, len(folders))
+	for k := range folders {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Printf("  %-40s %s\n", k, folders[k])
+	}
+	if env != nil {
+		fmt.Println("what that account's own environment says:")
+		for _, k := range []string{"USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP"} {
+			fmt.Printf("  %-40s %s\n", "%"+k+"%", env[k])
+		}
+	}
+	if werr != nil {
+		return werr
 	}
 	fmt.Println("\nthe installer will inventory THESE folders, because it asks Windows where they are " +
 		"(SHGetKnownFolderPath) rather than assuming the user profile directory. If it ever stopped " +

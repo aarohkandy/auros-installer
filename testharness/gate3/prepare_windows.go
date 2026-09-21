@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -274,25 +275,54 @@ func GrantFullControl(dir, user string) error {
 	return nil
 }
 
-// WarmProfile runs a trivial command as the migration user so that everything
-// Windows does on a first logon — creating the profile from C:\Users\Default,
-// writing the hive, seeding AppData — happens BEFORE any run is measured.
-func WarmProfile(s *UserSession, workDir string) error {
+// WarmProfile runs a trivial command as the migration user, for two reasons.
+//
+// The first is timing: everything Windows does on a first logon — creating the
+// profile from C:\Users\Default, writing the hive, seeding AppData — happens
+// here, BEFORE any run is measured, rather than inside a window where it would
+// be reported as a change to the system disk.
+//
+// The second is that it is the earliest possible check that the redirection took.
+// %APPDATA% and %LOCALAPPDATA% are built by Windows at logon FROM the same
+// registry values SHGetKnownFolderPath reads, so if they do not point into the
+// corpus, nothing else in this harness means anything and it is better to find
+// that out here than in a run that copies nothing and looks tidy.
+func WarmProfile(s *UserSession, workDir, corpusRoot string) (map[string]string, error) {
 	out := filepath.Join(workDir, "warm.txt")
-	p, err := StartInstaller(s, filepath.Join(os.Getenv("SystemRoot"), "System32", "whoami.exe"),
-		[]string{"/all"}, out, workDir)
+	p, err := StartInstaller(s, filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"),
+		[]string{"/c", "set"}, out, workDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer p.Close()
-	code, timedOut := p.Wait(120e9)
+	code, timedOut := p.Wait(2 * time.Minute)
 	if timedOut {
 		p.Kill()
-		return fmt.Errorf("gate3: the migration user's first logon did not finish in two minutes")
+		return nil, fmt.Errorf("gate3: the migration user's first logon did not finish in two minutes")
+	}
+	b, rerr := os.ReadFile(out)
+	if rerr != nil {
+		return nil, fmt.Errorf("gate3: the migration user ran but produced no output (%v). The launch "+
+			"path is what every run depends on, so this is fatal here rather than later", rerr)
 	}
 	if code != 0 {
-		b, _ := os.ReadFile(out)
-		return fmt.Errorf("gate3: warming the profile exited %d: %s", code, strings.TrimSpace(string(b)))
+		return nil, fmt.Errorf("gate3: warming the profile exited %d: %s", code, strings.TrimSpace(string(b)))
 	}
-	return nil
+	env := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(strings.TrimRight(line, "\r"), "=")
+		if ok {
+			env[strings.ToUpper(k)] = v
+		}
+	}
+	want := strings.ToLower(strings.TrimRight(corpusRoot, `\`))
+	for _, k := range []string{"APPDATA", "LOCALAPPDATA"} {
+		got := strings.ToLower(env[k])
+		if !strings.HasPrefix(got, want) {
+			return env, fmt.Errorf("gate3: the redirection did not take: %%%s%% is %q, which is not inside "+
+				"the corpus at %s. The installer would inventory the wrong folders and every run would "+
+				"be measuring nothing", k, env[k], corpusRoot)
+		}
+	}
+	return env, nil
 }
