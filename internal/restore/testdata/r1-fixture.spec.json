@@ -1,0 +1,18 @@
+{
+ "_comment": "R1 fixture spec, shared byte-for-byte with auros-base/matrix/run/lib/r1-fixture.spec.json. Each top-level directory is a copy-engine source Label. Names are chosen to exercise every encoding rule: percent, reserved device stem, trailing dot, a Sanitize-escaped byte, a wire-escaped control byte, raw byte-order sorting (U+FF21 sorts BEFORE an astral emoji in UTF-8 and AFTER it in UTF-16), a zero-byte file, and a second label.",
+ "mtime_unix_ns": 1700000000000000000,
+ "files": {
+  "Documents/a.txt": "hello\n",
+  "Documents/Zebra.txt": "uppercase sorts first\n",
+  "Documents/empty.txt": "",
+  "Documents/sub dir/notes 50%.txt": "percent\n",
+  "Documents/aux.txt": "reserved device name\n",
+  "Documents/trailing dot.": "stripped by Windows\n",
+  "Documents/what?.txt": "question\n",
+  "Documents/tab\there.txt": "control byte\n",
+  "Documents/R\u00e9sum\u00e9.txt": "unicode\n",
+  "Documents/\uff21.txt": "fullwidth A\n",
+  "Documents/\ud83d\ude00.txt": "astral\n",
+  "Pictures/holiday/photo.jpg": "not really a jpeg\n"
+ }
+}
