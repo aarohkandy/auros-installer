@@ -275,6 +275,34 @@ m13() {
 		w("%s", preVerifyHeading)'
 }
 
+# ── M25 ───────────────────────────────────────────────────────────────────
+# FATAL, and real (SYSTEM-REVIEW §2.7): the router stops looking for browser
+# profiles inside the AppData labels. That was the shipped state: Chrome's
+# Login Data, Cookies and Web Data restored as ordinary files under
+# "Restored from Windows", and Firefox never saw its profile.
+m25() {
+  mutate "$1/internal/restore/route.go" \
+    '	if browser, rest, ok := browserProfile(logicalPath); ok {' \
+    '	if browser, rest, ok := browserProfile(logicalPath); ok && false {'
+}
+
+# ── M25b ──────────────────────────────────────────────────────────────────
+# The profile match becomes case-sensitive. Windows paths are not.
+m25b() {
+  mutate "$1/internal/restore/route.go" \
+    'strings.EqualFold(logicalPath[:n], b.prefix)' \
+    'logicalPath[:n] == b.prefix'
+}
+
+# ── M26 ───────────────────────────────────────────────────────────────────
+# The Windows half's known-folder table stops spelling a label from the shared
+# table — the drift that let the two halves disagree in the first place.
+m26() {
+  mutate "$1/internal/winenv/knownfolders.go" \
+    '	{labels.LocalAppData, guid{' \
+    '	{"LocalAppdata", guid{'
+}
+
 # ── M14 ───────────────────────────────────────────────────────────────────
 # FATAL, and real: the finder stops looking one level down. The Windows half
 # writes <mount>/auros-backup/_auros/manifest.tsv; the first version of the
@@ -572,6 +600,16 @@ run_case M24 "stale .part files are never swept" \
 run_case M24b "the sweep deletes a user's own .part file" \
   ./internal/restore 'TestSweepPartials_TouchesOnlyItsOwnPatternInItsOwnDirectories' \
   'was not its to remove' m24b
+
+run_case M25 "browser profiles inside AppData are no longer recognised (FATAL, D15)" \
+  ./cmd/auros-migrate 'TestJoin_TheWindowsArchiveRoutesWhereTheLinuxHalfMeansItTo' \
+  'D15 BREACH' m25
+run_case M25b "the browser-profile match becomes case-sensitive" \
+  ./internal/restore 'TestRoute_ABrowserProfileIsFoundWhateverTheCaseOfItsPath' \
+  'D15 BREACH' m25b
+run_case M26 "the Windows known-folder table drifts from the shared labels" \
+  ./internal/winenv 'TestKnownFolders_ProduceExactlyTheSharedLabels' \
+  'the two halves disagree' m26
 
 echo
 echo "prove-red: $PASS caught, $FAIL not caught."

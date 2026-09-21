@@ -289,8 +289,8 @@ func TestExecute_ARootRunLeavesEveryFileOwnedByThePersonWhoseHomeItIs(t *testing
 
 	root := t.TempDir()
 	buildArchive(t, root, map[string]string{
-		"Firefox/Profiles/x.default/logins.json": "the user's own passwords",
-		"Documents/report.txt":                   "quarterly numbers",
+		"RoamingAppData/Mozilla/Firefox/Profiles/x.default/logins.json": "the user's own passwords",
+		"Documents/report.txt": "quarterly numbers",
 	})
 	s := runIt(t, context.Background(), root, l, Options{})
 	if !s.Clean() {
@@ -638,8 +638,8 @@ func TestExecute_HandsEveryCreatedPathToTheHomeOwner(t *testing.T) {
 	home, l := newHome(t)
 	root := t.TempDir()
 	buildArchive(t, root, map[string]string{
-		"Firefox/Profiles/x.default/logins.json": "the user's own passwords",
-		"Documents/sub/report.txt":               "quarterly numbers",
+		"RoamingAppData/Mozilla/Firefox/Profiles/x.default/logins.json": "the user's own passwords",
+		"Documents/sub/report.txt":                                      "quarterly numbers",
 	})
 	rec := &chownRecorder{got: map[string][2]int{}}
 	own := &Ownership{UID: 4242, GID: 4343, chown: rec.chown}
@@ -735,8 +735,8 @@ func TestSweepPartials_TouchesOnlyItsOwnPatternInItsOwnDirectories(t *testing.T)
 		}
 	}
 	keep := map[string]string{
-		filepath.Join(docs, "my.part"):                        "a user's file that ends in .part",
-		filepath.Join(docs, ".auros-restore-.part"):           "the pattern with nothing in the middle",
+		filepath.Join(docs, "my.part"):                       "a user's file that ends in .part",
+		filepath.Join(docs, ".auros-restore-.part"):          "the pattern with nothing in the middle",
 		filepath.Join(elsewhere, ".auros-restore-1234.part"): "our pattern, in a directory this plan does not write to",
 	}
 	for p, c := range keep {

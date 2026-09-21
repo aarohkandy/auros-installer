@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/aarohkandy/auros-installer/internal/labels"
 )
 
 // Disposition is what the plan decided to do with one manifest entry. There is
@@ -96,10 +98,18 @@ func (r *Router) Route(logicalPath string) (Route, error) {
 		return Route{}, fmt.Errorf("restore: %q has no path under its label", logicalPath)
 	}
 
+	// Browser profiles are not labels. The Windows half copies known folders,
+	// and a profile travels INSIDE the AppData ones, so it is recognised by
+	// where the browser keeps it — before the label switch, or it falls
+	// through to "Restored from Windows" with its passwords (§2.7).
+	if browser, rest, ok := browserProfile(logicalPath); ok {
+		return r.routeBrowser(browser, rest), nil
+	}
+
 	switch label {
-	case "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos":
+	case labels.Desktop, labels.Documents, labels.Downloads, labels.Music, labels.Pictures, labels.Videos:
 		key := "XDG_" + strings.ToUpper(label) + "_DIR"
-		if label == "Downloads" {
+		if label == labels.Downloads {
 			key = "XDG_DOWNLOAD_DIR" // singular, per the xdg-user-dirs spec
 		}
 		dir, src := r.L.Dir(key)
@@ -114,47 +124,10 @@ func (r *Router) Route(logicalPath string) (Route, error) {
 			Bucket: label,
 		}, nil
 
-	case "Firefox":
-		// Firefox's own profiles.ini uses forward-slash relative paths with
-		// IsRelative=1, so the Windows tree ("Profiles/xxxx.default-release")
-		// is valid unchanged under ~/.mozilla/firefox. 0700: a Firefox profile
-		// holds saved sessions and history.
-		return Route{
-			Disposition: DispFile,
-			Target:      filepath.Join(r.L.Home, ".mozilla", "firefox", filepath.FromSlash(rest)),
-			DirMode:     0o700, FileMode: 0o600,
-			Why:    "Firefox profiles live in ~/.mozilla/firefox on Linux",
-			Bucket: "Firefox",
-		}, nil
-
-	case "Chrome", "Edge":
-		dir := ".config/google-chrome"
-		if label == "Edge" {
-			dir = ".config/microsoft-edge"
-		}
-		base := filepath.Base(rest)
-		keep, why := browserAllowed(base)
-		if !keep {
-			return Route{
-				Disposition: DispWithheld,
-				Why: "D15: " + label + " passwords, cookies and payment data are sealed by " +
-					"App-Bound Encryption and cannot be moved to another machine. " +
-					"Only bookmarks and history come across. This file is not one of them.",
-				Bucket: label,
-			}, nil
-		}
-		return Route{
-			Disposition: DispFile,
-			Target:      filepath.Join(r.L.Home, filepath.FromSlash(dir), filepath.FromSlash(rest)),
-			DirMode:     0o700, FileMode: 0o600,
-			Why:    why,
-			Bucket: label,
-		}, nil
-
-	case "WiFi":
+	case labels.WiFi:
 		return Route{Disposition: DispWiFi, Why: "exported wireless profile", Bucket: "Wi-Fi"}, nil
 
-	case "Printers":
+	case labels.Printers:
 		return Route{Disposition: DispPrinters, Why: "printer inventory", Bucket: "Printers"}, nil
 
 	default:
@@ -169,6 +142,70 @@ func (r *Router) Route(logicalPath string) (Route, error) {
 			Why:    fmt.Sprintf("no rule for the label %q; kept together rather than guessed at", label),
 			Bucket: "Other (" + label + ")",
 		}, nil
+	}
+}
+
+// browserRoots are where each browser keeps its profiles inside the AppData
+// labels. Matched case-insensitively, because Windows paths are: a folder
+// spelled "user data" is the same folder, and missing it would restore the
+// password database as an ordinary file.
+var browserRoots = []struct{ prefix, name string }{
+	{labels.ChromeUserData, "Chrome"},
+	{labels.EdgeUserData, "Edge"},
+	{labels.FirefoxRoot, "Firefox"},
+}
+
+// browserProfile reports which browser's profile tree logicalPath is in, and
+// its path relative to that browser's root.
+func browserProfile(logicalPath string) (browser, rest string, ok bool) {
+	for _, b := range browserRoots {
+		n := len(b.prefix)
+		if len(logicalPath) > n+1 && logicalPath[n] == '/' && strings.EqualFold(logicalPath[:n], b.prefix) {
+			return b.name, logicalPath[n+1:], true
+		}
+	}
+	return "", "", false
+}
+
+// routeBrowser places one file of a browser profile. rest is relative to the
+// browser's root: "Default/Bookmarks" for Chrome and Edge ("User Data" on
+// Windows is ~/.config/google-chrome on Linux), "Profiles/x/places.sqlite" or
+// "profiles.ini" for Firefox.
+func (r *Router) routeBrowser(label, rest string) Route {
+	if label == "Firefox" {
+		// Firefox's own profiles.ini uses forward-slash relative paths with
+		// IsRelative=1, so the Windows tree ("Profiles/xxxx.default-release")
+		// is valid unchanged under ~/.mozilla/firefox. 0700: a Firefox profile
+		// holds saved sessions and history.
+		return Route{
+			Disposition: DispFile,
+			Target:      filepath.Join(r.L.Home, ".mozilla", "firefox", filepath.FromSlash(rest)),
+			DirMode:     0o700, FileMode: 0o600,
+			Why:    "Firefox profiles live in ~/.mozilla/firefox on Linux",
+			Bucket: "Firefox",
+		}
+	}
+	dir := ".config/google-chrome"
+	if label == "Edge" {
+		dir = ".config/microsoft-edge"
+	}
+	base := filepath.Base(rest)
+	keep, why := browserAllowed(base)
+	if !keep {
+		return Route{
+			Disposition: DispWithheld,
+			Why: "D15: " + label + " passwords, cookies and payment data are sealed by " +
+				"App-Bound Encryption and cannot be moved to another machine. " +
+				"Only bookmarks and history come across. This file is not one of them.",
+			Bucket: label,
+		}
+	}
+	return Route{
+		Disposition: DispFile,
+		Target:      filepath.Join(r.L.Home, filepath.FromSlash(dir), filepath.FromSlash(rest)),
+		DirMode:     0o700, FileMode: 0o600,
+		Why:    why,
+		Bucket: label,
 	}
 }
 

@@ -121,7 +121,7 @@ func TestIsLitter_IsNarrow(t *testing.T) {
 		{"a/b/THUMBS.DB", true},
 		{"desktop.ini", true},
 		{"._x", true},
-		{"._", false},                  // nothing after the prefix
+		{"._", false},                   // nothing after the prefix
 		{"Documents/_notes.txt", false}, // one underscore, not AppleDouble
 		{"Documents/thumbs.db.bak", false},
 		{"Documents/My Trash-1000/x", false},

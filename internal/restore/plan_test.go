@@ -129,14 +129,14 @@ func TestPlan_ChromeSecretsAreWithheldAndNamed(t *testing.T) {
 	_, l := newHome(t)
 	root := t.TempDir()
 	a := buildArchive(t, root, map[string]string{
-		"Chrome/Default/Bookmarks":            "{}",
-		"Chrome/Default/History":              "sqlite",
-		"Chrome/Default/Login Data":           "SECRET",
-		"Chrome/Default/Cookies":              "SECRET",
-		"Chrome/Default/Web Data":             "SECRET",
-		"Chrome/Local State":                  "SECRET",
-		"Chrome/Default/Network/Cookies":      "SECRET",
-		"Edge/Default/Login Data For Account": "SECRET",
+		"LocalAppData/Google/Chrome/User Data/Default/Bookmarks":               "{}",
+		"LocalAppData/Google/Chrome/User Data/Default/History":                 "sqlite",
+		"LocalAppData/Google/Chrome/User Data/Default/Login Data":              "SECRET",
+		"LocalAppData/Google/Chrome/User Data/Default/Cookies":                 "SECRET",
+		"LocalAppData/Google/Chrome/User Data/Default/Web Data":                "SECRET",
+		"LocalAppData/Google/Chrome/User Data/Local State":                     "SECRET",
+		"LocalAppData/Google/Chrome/User Data/Default/Network/Cookies":         "SECRET",
+		"LocalAppData/Microsoft/Edge/User Data/Default/Login Data For Account": "SECRET",
 	})
 	p, err := BuildPlan(a, l)
 	if err != nil {
@@ -147,15 +147,15 @@ func TestPlan_ChromeSecretsAreWithheldAndNamed(t *testing.T) {
 		restored[it.Entry.Path] = true
 	}
 	for _, secret := range []string{
-		"Chrome/Default/Login Data", "Chrome/Default/Cookies", "Chrome/Default/Web Data",
-		"Chrome/Local State", "Chrome/Default/Network/Cookies",
-		"Edge/Default/Login Data For Account",
+		"LocalAppData/Google/Chrome/User Data/Default/Login Data", "LocalAppData/Google/Chrome/User Data/Default/Cookies", "LocalAppData/Google/Chrome/User Data/Default/Web Data",
+		"LocalAppData/Google/Chrome/User Data/Local State", "LocalAppData/Google/Chrome/User Data/Default/Network/Cookies",
+		"LocalAppData/Microsoft/Edge/User Data/Default/Login Data For Account",
 	} {
 		if restored[secret] {
 			t.Errorf("D15 BREACH: %q is planned for restore", secret)
 		}
 	}
-	if !restored["Chrome/Default/Bookmarks"] || !restored["Chrome/Default/History"] {
+	if !restored["LocalAppData/Google/Chrome/User Data/Default/Bookmarks"] || !restored["LocalAppData/Google/Chrome/User Data/Default/History"] {
 		t.Error("bookmarks and history must migrate — D15 says they do")
 	}
 	if len(p.Withheld) != 6 {
@@ -174,7 +174,7 @@ func TestPlan_AnUnknownChromeFileIsWithheldByDefault(t *testing.T) {
 	_, l := newHome(t)
 	root := t.TempDir()
 	a := buildArchive(t, root, map[string]string{
-		"Chrome/Default/Something Invented In 2027": "who knows",
+		"LocalAppData/Google/Chrome/User Data/Default/Something Invented In 2027": "who knows",
 	})
 	p, err := BuildPlan(a, l)
 	if err != nil {
@@ -189,16 +189,16 @@ func TestPlan_FirefoxGoesToDotMozilla(t *testing.T) {
 	home, l := newHome(t)
 	root := t.TempDir()
 	a := buildArchive(t, root, map[string]string{
-		"Firefox/profiles.ini":                          "[Profile0]",
-		"Firefox/Profiles/abcd.default-release/key4.db": "k",
+		"RoamingAppData/Mozilla/Firefox/profiles.ini":                          "[Profile0]",
+		"RoamingAppData/Mozilla/Firefox/Profiles/abcd.default-release/key4.db": "k",
 	})
 	p, err := BuildPlan(a, l)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"Firefox/profiles.ini": filepath.Join(home, ".mozilla", "firefox", "profiles.ini"),
-		"Firefox/Profiles/abcd.default-release/key4.db": filepath.Join(
+		"RoamingAppData/Mozilla/Firefox/profiles.ini": filepath.Join(home, ".mozilla", "firefox", "profiles.ini"),
+		"RoamingAppData/Mozilla/Firefox/Profiles/abcd.default-release/key4.db": filepath.Join(
 			home, ".mozilla", "firefox", "Profiles", "abcd.default-release", "key4.db"),
 	}
 	for _, it := range p.Files {
@@ -235,11 +235,11 @@ func TestPlan_EveryEntryIsAccountedFor(t *testing.T) {
 	_, l := newHome(t)
 	root := t.TempDir()
 	a := buildArchive(t, root, map[string]string{
-		"Documents/a.txt":        "a",
-		"Chrome/Default/Cookies": "secret",
-		"WiFi/SchoolWiFi.xml":    "<WLANProfile/>",
-		"Printers/printers.tsv":  "x",
-		"Something/else.bin":     "b",
+		"Documents/a.txt": "a",
+		"LocalAppData/Google/Chrome/User Data/Default/Cookies": "secret",
+		"WiFi/SchoolWiFi.xml":   "<WLANProfile/>",
+		"Printers/printers.tsv": "x",
+		"Something/else.bin":    "b",
 	})
 	p, err := BuildPlan(a, l)
 	if err != nil {
@@ -411,5 +411,19 @@ func TestPlan_APathThatIsNotWhatItClaimsIsRefused(t *testing.T) {
 				t.Fatalf("err = %v, want ErrPathEscape for %q", err, bad)
 			}
 		})
+	}
+}
+
+// Windows paths are case-insensitive, so "user data" IS Chrome's profile
+// directory. Matching it case-sensitively would send the password database
+// to "Restored from Windows" as an ordinary file (D15).
+func TestRoute_ABrowserProfileIsFoundWhateverTheCaseOfItsPath(t *testing.T) {
+	_, l := newHome(t)
+	rt, err := (&Router{L: l}).Route("LocalAppData/google/chrome/user data/Default/Login Data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.Disposition != DispWithheld {
+		t.Fatalf("D15 BREACH: a differently-cased Chrome profile's Login Data is %s to %s", rt.Disposition, rt.Target)
 	}
 }

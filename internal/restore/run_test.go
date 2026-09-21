@@ -570,8 +570,8 @@ func TestExecute_AWithheldFileIsNeverWrittenAnywhere(t *testing.T) {
 	home, l := newHome(t)
 	root := t.TempDir()
 	buildArchive(t, root, map[string]string{
-		"Documents/a.txt":           "aaa",
-		"Chrome/Default/Login Data": "SUPER SECRET PASSWORD BLOB",
+		"Documents/a.txt": "aaa",
+		"LocalAppData/Google/Chrome/User Data/Default/Login Data": "SUPER SECRET PASSWORD BLOB",
 	})
 	s := runIt(t, context.Background(), root, l, Options{})
 	if !s.Clean() {
