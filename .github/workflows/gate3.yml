@@ -70,24 +70,49 @@ jobs:
         with: { go-version: '1.25.14', cache: true }
       - name: Vet, test and cross-compile both modules
         shell: bash -euo pipefail {0}
+        # Every check runs and every failure is printed BEFORE the step exits.
+        # A build step that stops at the first complaint costs one round trip
+        # per complaint, and the machine this repository is written on has no Go
+        # toolchain (D5), so a round trip is a workflow run. The step still
+        # fails closed: `bad` is the exit status and nothing sets it to zero.
         run: |
-          gofmt -l . | tee /tmp/fmt; [ ! -s /tmp/fmt ] || { echo "gofmt found unformatted files"; exit 1; }
-          go vet ./...
-          go test ./... -race -count=1
-          ( cd testharness
-            gofmt -l . | tee /tmp/fmt2; [ ! -s /tmp/fmt2 ] || { echo "gofmt found unformatted files"; exit 1; }
-            go vet ./...
-            go test ./... -race -count=1 )
+          bad=0
+          report() { echo "::error::$1"; bad=1; }
+
+          echo "::group::gofmt"
+          gofmt -l . > /tmp/fmt-root.txt || true
+          ( cd testharness && gofmt -l . ) > /tmp/fmt-th.txt || true
+          if [ -s /tmp/fmt-root.txt ] || [ -s /tmp/fmt-th.txt ]; then
+            gofmt -d . || true
+            ( cd testharness && gofmt -d . ) || true
+            cat /tmp/fmt-root.txt /tmp/fmt-th.txt
+            report "gofmt found unformatted files"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::root module"
+          go vet ./... || report "go vet (root) failed"
+          go test ./... -race -count=1 || report "go test (root) failed"
+          echo "::endgroup::"
+
+          echo "::group::testharness module"
+          ( cd testharness && go vet ./... ) || report "go vet (testharness) failed"
+          ( cd testharness && go test ./... -race -count=1 ) || report "go test (testharness) failed"
+          echo "::endgroup::"
+
+          echo "::group::cross-compile"
           mkdir -p dist
           # 386 as well as amd64: 2012-era machines running 32-bit Windows are inside our target cohort.
-          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/auros-migrate-amd64.exe ./cmd/auros-migrate
-          GOOS=windows GOARCH=386   go build -trimpath -ldflags="-s -w" -o dist/auros-migrate-386.exe   ./cmd/auros-migrate
-          ( cd testharness
-            GOOS=windows GOARCH=amd64 go build -trimpath -o ../dist/gen.exe   ./gen
-            GOOS=windows GOARCH=amd64 go build -trimpath -o ../dist/gate3.exe ./gate3/cmd/gate3
-            GOOS=windows GOARCH=386   go vet ./...
-            go build -trimpath -o ../dist/gate3-linux ./gate3/cmd/gate3 )
-          ls -la dist/
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/auros-migrate-amd64.exe ./cmd/auros-migrate || report "windows/amd64 installer build failed"
+          GOOS=windows GOARCH=386   go build -trimpath -ldflags="-s -w" -o dist/auros-migrate-386.exe   ./cmd/auros-migrate || report "windows/386 installer build failed"
+          ( cd testharness && GOOS=windows GOARCH=amd64 go build -trimpath -o ../dist/gen.exe   ./gen )   || report "gen build failed"
+          ( cd testharness && GOOS=windows GOARCH=amd64 go build -trimpath -o ../dist/gate3.exe ./gate3/cmd/gate3 ) || report "gate3 windows build failed"
+          ( cd testharness && GOOS=windows GOARCH=386 go vet ./... ) || report "windows/386 vet (testharness) failed"
+          ( cd testharness && go build -trimpath -o ../dist/gate3-linux ./gate3/cmd/gate3 ) || report "gate3 linux build failed"
+          ls -la dist/ || true
+          echo "::endgroup::"
+
+          exit $bad
       - name: The induced-failure catalogue this suite owes
         shell: bash -euo pipefail {0}
         run: ./dist/gate3-linux suite
