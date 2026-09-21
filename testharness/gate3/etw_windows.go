@@ -16,13 +16,14 @@ import (
 // needs nothing installed. See attrib.go for what the trace is for.
 //
 // Kernel-File keywords, as `logman query providers` printed them on the runner
-// (run 35565779074): 0x10 FILENAME, 0x20 FILEIO (SetInformation, SetDelete,
-// Rename), 0x80 CREATE, 0x200 WRITE, 0x400 DELETE_PATH, 0x800
+// (runs 35565779074, 35639286740): 0x10 FILENAME, 0x20 FILEIO (SetInformation,
+// SetDelete, Rename), 0x40 OP_END (OperationEnd: the status C1 reads a denied
+// open from), 0x80 CREATE, 0x200 WRITE, 0x400 DELETE_PATH, 0x800
 // RENAME_SETLINK_PATH, 0x1000 CREATE_NEW_FILE. No READ. FILEIO and WRITE are
 // there for writes through handles opened before the trace (see attrib.go).
 // Kernel-Process 0x10 is WINEVENT_KEYWORD_PROCESS.
 var traceProviders = []struct{ session, provider, keywords string }{
-	{"gate3-file", "Microsoft-Windows-Kernel-File", "0x1EB0"},
+	{"gate3-file", "Microsoft-Windows-Kernel-File", "0x1EF0"},
 	{"gate3-proc", "Microsoft-Windows-Kernel-Process", "0x10"},
 }
 
@@ -57,7 +58,7 @@ func StartTrace(dir string) (*Trace, error) {
 	// Ask Kernel-File to name what is already open, so a write through a handle
 	// that predates the trace can be tied to a path. If the provider has no
 	// rundown this names nothing, those writes stay unattributed, and they fail.
-	if err := captureState("gate3-file", &kernelFileGUID, 0x1EB0); err != nil {
+	if err := captureState("gate3-file", &kernelFileGUID, 0x1EF0); err != nil {
 		fmt.Printf("gate3: Kernel-File name rundown not requested: %v\n", err)
 	}
 	return t, nil

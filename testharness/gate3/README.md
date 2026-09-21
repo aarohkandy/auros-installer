@@ -37,19 +37,18 @@ possible way to test nothing at all.
 
 Nothing in a verdict comes from the installer's account of itself.
 
-**The invariant — nothing written to C:.** The harness records the NTFS **change journal** position
-before the installer starts and again after it exits, reads every record in between, resolves each to a
-full path, and requires the remainder — after a published noise list — to be empty.
+**The invariant — nothing written to C:, by enforcement.** Before each run the migration account is
+given an explicit **deny** ACE on `C:\` — `FILE_WRITE_DATA`, `FILE_APPEND_DATA`, `FILE_WRITE_ATTRIBUTES`,
+`FILE_WRITE_EA`, `DELETE`, `FILE_DELETE_CHILD` (mask `0x00010156`), `OBJECT_INHERIT_ACE |
+CONTAINER_INHERIT_ACE` — exempting only its own profile directory (its TEMP is inside it). The ACE is
+read back, proved by making the account try to create directories (refused at `C:\` and under
+`C:\ProgramData`, allowed in the profile), and removed after the run. C1 then reads the ETW trace for
+the installer's process tree and fails on any write-class operation on C: outside the exemption, any open
+the deny refused (`STATUS_ACCESS_DENIED`), or an ACE that could not be applied, verified or removed.
+Writes inside the exemption are listed in every result.
 
-The obvious alternative, listing every file on C: before and after and diffing names and sizes, was
-measured on this runner: **1,194,439 files, 276 seconds per pass**. Two passes per run over 120 runs is
-eighteen hours of enumeration, and a check that costs that much gets weakened rather than run. The
-journal is also the stronger measurement: it sees a file created and deleted again, a change that did
-not alter a length, an attribute or security change, and a new alternate data stream. A name-and-size
-diff sees none of those.
-
-It fails closed. An error reading the journal, a journal whose id changed, or a journal that discarded
-records we had not read are all failures, because in each case the window cannot be accounted for.
+The whole-disk change-journal diff this replaced never converged on a shared runner: Windows' own
+servicing writes C: whatever the installer does. It is still recorded, as a report line that never gates.
 
 **Progress — where "43% of the copy" is.** From the Windows **job object's I/O accounting**: the bytes
 the operating system saw this process tree read and write. The installer has no progress protocol and
@@ -160,6 +159,7 @@ Those three work anywhere. Everything that touches a machine — `mint-token`, `
 `prove-red` — is Windows-only and refuses to exist elsewhere.
 
 `prove-red` is DECISIONS.md **D34** applied to the one check that cannot be exercised off a real
-machine: it writes one file to `C:` inside a marked window, deletes it again, and requires the invariant
-check to report it. A check nobody has watched fail is a check nobody knows works. It runs as its own
-job in the workflow, and the verdict refuses to pass if it did not.
+machine: under the same trace, it reads a C: file, writes one to C:, tries to write into a directory
+carrying the run's deny ACE, and writes into a declared exemption, and requires each to be classified
+correctly and C1 to go red. A check nobody has watched fail is a check nobody knows works. It runs as its
+own job in the workflow, and the verdict refuses to pass if it did not.

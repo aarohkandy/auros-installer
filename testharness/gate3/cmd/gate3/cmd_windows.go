@@ -206,8 +206,6 @@ func cmdRun(args []string) error {
 	timeout := fs.Duration("timeout", 45*time.Minute, "how long the installer gets before it is killed")
 	profile := fs.String("profile", "realistic", "the corpus profile, for the record")
 	seed := fs.Uint64("seed", 0, "the corpus seed, for the record")
-	settleQuiet := fs.Duration("settle-quiet", gate3.DefaultSettleQuiet, "how long C: must go without a change outside the noise list before measuring")
-	settleMax := fs.Duration("settle-max", gate3.DefaultSettleMax, "fail the run as not quiescent if C: has not settled by then")
 	noFormat := fs.Bool("no-format", false, "do not wipe the destination volume first (for debugging only)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -257,8 +255,7 @@ func cmdRun(args []string) error {
 		User: *user, Password: strings.TrimSpace(string(pw)),
 		WorkDir: filepath.Join(*work, id), Timeout: *timeout,
 		Profile: *profile, Seed: *seed, Faithful: true,
-		Image:       os.Getenv("ImageOS") + " " + os.Getenv("ImageVersion"),
-		SettleQuiet: *settleQuiet, SettleMax: *settleMax,
+		Image: os.Getenv("ImageOS") + " " + os.Getenv("ImageVersion"),
 	}
 	res, err := gate3.RunOnce(cfg)
 	if err != nil {
@@ -279,16 +276,6 @@ func cmdRun(args []string) error {
 	return nil
 }
 
-// errSuffix makes a report's own error visible. Without it, a window that
-// failed closed — a journal recreated underneath it, a read that errored —
-// prints as "0 records" and reads like a quiet machine.
-func errSuffix(r *gate3.SystemDiskReport) string {
-	if r == nil || r.Error == "" {
-		return ""
-	}
-	return "\n   the window could not be accounted for: " + r.Error
-}
-
 func cmdFormatDestination(args []string) error {
 	fs := flag.NewFlagSet("format-destination", flag.ExitOnError)
 	vol := fs.String("volume", "", `the volume to wipe, e.g. E:\`)
@@ -304,13 +291,16 @@ func cmdFormatDestination(args []string) error {
 	return gate3.FormatDestination(*vol)
 }
 
-// cmdProveRed is DECISIONS.md D34 applied to the one check that cannot be
-// exercised anywhere but here: the change-journal measurement of the system
-// disk.
+// cmdProveRed is DECISIONS.md D34 applied to C1, the one check that cannot be
+// exercised anywhere but here.
 //
-// It writes one small file to C:, inside a marked window, and requires the check
-// to report it. A check nobody has watched fail is a check nobody knows works,
-// and this one is the whole of D27.
+// This process stands in for the installer's tree. Under the same ETW trace a
+// run uses, it opens a C: file read-only, writes a file to C: outside any
+// exemption, tries to write into a directory carrying the same deny ACE a run
+// puts on C:\ (applied by the same code, to a directory rather than the whole
+// volume), and writes into a directory declared exempt. Each must land in its
+// own bucket, and C1 must go red. A check nobody has watched fail is a check
+// nobody knows works.
 func cmdProveRed(args []string) error {
 	fs := flag.NewFlagSet("prove-red", flag.ExitOnError)
 	work := fs.String("work", "", "a working directory")
@@ -320,130 +310,113 @@ func cmdProveRed(args []string) error {
 	if err := assertDisposable(); err != nil {
 		return err
 	}
-	_ = work
-
-	// The journal is resized here rather than by the workflow, because resizing
-	// recreates it and the harness has to wait for that to settle before it
-	// marks anything.
-	if err := gate3.EnlargeJournal("C:", 512<<20, 64<<20); err != nil {
-		return err
+	if *work == "" {
+		*work = os.TempDir()
 	}
-
-	// 1. A window in which nothing of ours touches C: must come back clean.
-	quiet, err := gate3.MarkUSN("C:")
+	tok, err := syscall.OpenCurrentProcessToken()
 	if err != nil {
 		return err
 	}
-	time.Sleep(2 * time.Second)
-	quietRep, err := gate3.DiffUSN(quiet, nil, nil)
+	u, err := tok.GetTokenUser()
+	tok.Close()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("idle window: %d records, %d excused as noise, %d unexplained (journal %d, USN %d..%d)%s\n",
-		quietRep.Records, quietRep.Excluded, len(quietRep.Unexplained),
-		quietRep.JournalID, quietRep.StartUSN, quietRep.EndUSN, errSuffix(quietRep))
-	for _, u := range quietRep.Unexplained {
-		fmt.Printf("   ! %s\n", u)
+	sid, err := u.User.Sid.String()
+	if err != nil {
+		return err
 	}
 
-	// 2. A window in which something DOES touch C: must come back red. The file
-	//    is written where a migration tool would plausibly put scratch state,
-	//    and it is deleted again immediately — a name-and-size snapshot would
-	//    not have seen it at all.
-	//    The ETW trace runs across it with THIS process as the installer's
-	//    root: attribution must name the probe's writer and must not excuse it.
-	//    A second probe is written through a handle opened BEFORE the trace
-	//    started, the way a long-running service writes (run 35565779074: the
-	//    Entra broker's ActivationStore.dat, basic-info-change only, no open in
-	//    the window). It must be attributed too, or such writes stay unattributed.
-	fmt.Print(gate3.ProviderKeywords())
-	handleProbe := `C:\auros-gate3-prove-red-handle.tmp`
-	hp, err := os.OpenFile(handleProbe, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	root := `C:\auros-gate3-prove-red`
+	denied, exempt := filepath.Join(root, "denied"), filepath.Join(root, "exempt")
+	os.RemoveAll(root)
+	for _, d := range []string{denied, exempt} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+	defer os.RemoveAll(root)
+	ace, err := gate3.ApplyDeny(denied, sid)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(handleProbe)
-	defer hp.Close()
-	trace, err := gate3.StartTrace(filepath.Join(os.TempDir(), "gate3-prove-red-etw"))
+	defer func() {
+		if err := gate3.RemoveDeny(denied, sid); err != nil {
+			fmt.Printf("gate3: %v\n", err)
+		}
+	}()
+	fmt.Printf("deny ACE on %s: %s\n", denied, ace)
+
+	trace, err := gate3.StartTrace(filepath.Join(*work, "gate3-prove-red-etw"))
 	if err != nil {
 		return err
 	}
 	defer trace.Stop()
-	mark, err := gate3.MarkUSN("C:")
-	if err != nil {
+
+	hosts := filepath.Join(os.Getenv("SystemRoot"), "System32", "drivers", "etc", "hosts")
+	if _, err := os.ReadFile(hosts); err != nil {
 		return err
 	}
-	probe := `C:\auros-gate3-prove-red.tmp`
-	if err := os.WriteFile(probe, []byte("a tool wrote this to the system disk\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "written.tmp"), []byte("a tool wrote this to C:\n"), 0o644); err != nil {
 		return err
 	}
-	if err := os.Remove(probe); err != nil {
+	if err := os.WriteFile(filepath.Join(denied, "blocked.tmp"), []byte("x"), 0o644); err == nil {
+		return fmt.Errorf("the deny ACE %s did not stop a write into %s", ace, denied)
+	} else {
+		fmt.Printf("the deny ACE refused the write, as it must: %v\n", err)
+	}
+	if err := os.WriteFile(filepath.Join(exempt, "allowed.tmp"), []byte("x"), 0o644); err != nil {
 		return err
 	}
-	if _, err := hp.Write([]byte("written through a handle that predates the trace\n")); err != nil {
-		return err
-	}
-	ft := syscall.NsecToFiletime(time.Now().Add(-time.Hour).UnixNano())
-	if err := syscall.SetFileTime(syscall.Handle(hp.Fd()), nil, nil, &ft); err != nil {
-		return err
-	}
-	hp.Close()
 	time.Sleep(2 * time.Second)
+
 	attr := trace.Attribute([]uint32{uint32(os.Getpid())})
 	fmt.Printf("trace events: %v\n", attr.Events)
 	for id, fields := range attr.Schema {
 		fmt.Printf("schema Kernel-File/%s: %s\n", id, fields)
 	}
-	rep, err := gate3.DiffUSN(mark, nil, attr)
-	if err != nil {
-		return err
+	w := attr.AuditWrites([]string{exempt})
+	for _, l := range w.Writes {
+		fmt.Printf("   WROTE  %s\n", l)
 	}
-	fmt.Printf("attribution: %s\n", rep.Attribution)
-	for _, u := range rep.Background {
-		fmt.Printf("   ~ %s\n", u)
+	for _, l := range w.Denied {
+		fmt.Printf("   DENIED %s\n", l)
 	}
-	if !strings.HasPrefix(rep.Attribution, "on:") {
-		return fmt.Errorf("attribution did not come on, so every clean run would fail closed: %s", rep.Attribution)
+	for _, l := range w.Exempt {
+		fmt.Printf("   exempt %s\n", l)
 	}
-	found, attributed := false, false
-	for _, u := range rep.Unexplained {
-		if strings.Contains(strings.ToLower(u), "auros-gate3-prove-red.tmp") {
-			found = true
-			attributed = attributed || strings.Contains(u, "installer's process tree")
-			fmt.Printf("the system-disk check reported it: %s\n", u)
+	if w.Error != "" {
+		return fmt.Errorf("the trace could not vouch for the window, so every run would fail closed: %s", w.Error)
+	}
+	in := func(bucket []string, name string) bool {
+		for _, l := range bucket {
+			if strings.Contains(strings.ToLower(l), name) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []struct {
+		ok   bool
+		what string
+	}{
+		{in(w.Writes, `prove-red\written.tmp`), "the write to C: outside the exemptions is not under writes"},
+		{in(w.Denied, `denied\blocked.tmp`), "the write the deny ACE refused is not under denied attempts"},
+		{in(w.Exempt, `exempt\allowed.tmp`), "the write into the exemption is not under exempt writes"},
+		{!in(w.Writes, `exempt\`) && !in(w.Denied, `exempt\`), "a write into the exemption was counted against the run"},
+		{!in(w.Writes, `blocked.tmp`) && !in(w.Exempt, `blocked.tmp`), "the refused write landed in the wrong bucket"},
+		{!in(append(append(w.Writes, w.Denied...), w.Exempt...), `\hosts`), "a read-only open of " + hosts + " was counted as a write"},
+	} {
+		if !c.ok {
+			return fmt.Errorf("C1's classification is wrong on a real trace: %s", c.what)
 		}
 	}
-	if found && !attributed {
-		return fmt.Errorf("the probe was reported but not attributed to the process that wrote it")
+	enf := &gate3.Enforcement{Path: denied, SID: sid, ACE: ace, Applied: true, Verified: true, Exemptions: []string{exempt}}
+	ok, detail := gate3.SystemDiskVerdict(enf, w)
+	fmt.Printf("C1 on this window: ok=%v: %s\n", ok, detail)
+	if ok {
+		return fmt.Errorf("C1 PASSED a window in which C: was written to: it is decoration, not a check")
 	}
-	handleLine := ""
-	for _, u := range append(append([]string{}, rep.Unexplained...), rep.Background...) {
-		if strings.Contains(strings.ToLower(u), "auros-gate3-prove-red-handle.tmp") {
-			handleLine = u
-		}
-	}
-	fmt.Printf("the handle probe: %s\n", handleLine)
-	for _, n := range rep.TraceNotes {
-		fmt.Printf("   ? %s\n", n)
-	}
-	if !strings.Contains(handleLine, "installer's process tree") {
-		return fmt.Errorf("a write through a handle opened before the trace was not attributed to its "+
-			"writer (%q): writes like that on a clean run stay unattributed and fail", handleLine)
-	}
-	if !found {
-		return fmt.Errorf("THE SYSTEM-DISK CHECK DID NOT NOTICE a file created and deleted on C: "+
-			"during its window. It is decoration, not a check. (%d records, %d unexplained, "+
-			"journal %d, USN %d..%d)%s",
-			rep.Records, len(rep.Unexplained), rep.JournalID, rep.StartUSN, rep.EndUSN, errSuffix(rep))
-	}
-	// A quiet window with zero records is only suspicious if the journal moved.
-	// Run 35562498238 measured a truly idle two seconds (USN start == end) and
-	// failed here; the probe in step 2 is what proves the reader works.
-	if quietRep.ReaderMissedRecords() {
-		return fmt.Errorf("the journal advanced from USN %d to %d during the idle window and the reader "+
-			"returned no records: the journal is not being read, and a check that sees nothing passes "+
-			"everything", quietRep.StartUSN, quietRep.EndUSN)
-	}
-	fmt.Println("the system-disk check goes red when the system disk is written to, and green when it is not")
+	fmt.Println("C1 goes red on a write to C: and on a refused attempt, and does not count reads or the exemption")
 	return nil
 }

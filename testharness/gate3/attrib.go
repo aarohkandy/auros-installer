@@ -84,6 +84,23 @@ type Attribution struct {
 	// Unresolved lists handle-based writes whose FileKey no event named: the
 	// evidence for an unattributed change, printed rather than guessed at.
 	Unresolved []string
+
+	// For C1 (see enforce.go): every file operation, in trace order, and what
+	// is needed to finish one. foName names a FileObject by the Create that
+	// opened it; pending holds a Create until its OperationEnd gives the status.
+	ops     []fileOp
+	foName  map[string]string
+	pending map[string]int
+}
+
+type fileOp struct {
+	pid     uint32
+	id      int
+	path    string // full lowercased NT path; "" until a handle is named
+	key     string
+	write   bool // a write-class operation
+	unknown bool // a Create whose CreateOptions the trace did not carry
+	denied  bool // its OperationEnd said STATUS_ACCESS_DENIED
 }
 
 // Kernel-File events that name a path in the caller's context: Create (12),
@@ -123,6 +140,7 @@ func ParseTrace(r io.Reader, device string, roots []uint32, images map[uint32]st
 		images: map[uint32]string{}, installer: map[uint32]bool{},
 		byPID: map[uint32]int{}, Events: map[string]int{},
 		keyName: map[string]string{}, keyed: map[string]map[uint32]string{}, Schema: map[string]string{},
+		foName: map[string]string{}, pending: map[string]int{},
 	}
 	for k, v := range images {
 		a.images[k] = v
@@ -171,8 +189,20 @@ func (a *Attribution) add(ev etwEvent) {
 	for _, d := range ev.Data {
 		data[d.Name] = strings.TrimSpace(d.Value)
 	}
+	id := ev.System.EventID
+	kernelFile := strings.EqualFold(ev.System.Provider.Name, "Microsoft-Windows-Kernel-File")
+	if kernelFile {
+		if _, seen := a.Schema[strconv.Itoa(id)]; !seen {
+			var names []string
+			for _, d := range ev.Data {
+				names = append(names, d.Name)
+			}
+			a.Schema[strconv.Itoa(id)] = strings.Join(names, ",")
+		}
+	}
+	irp, fo := strings.ToLower(data["Irp"]), strings.ToLower(data["FileObject"])
 	switch {
-	case strings.EqualFold(ev.System.Provider.Name, "Microsoft-Windows-Kernel-Process") && ev.System.EventID == 1:
+	case strings.EqualFold(ev.System.Provider.Name, "Microsoft-Windows-Kernel-Process") && id == 1:
 		pid, perr := parseUint(data["ProcessID"])
 		ppid, qerr := parseUint(data["ParentProcessID"])
 		if perr == nil && qerr == nil {
@@ -181,16 +211,15 @@ func (a *Attribution) add(ev etwEvent) {
 				a.images[pid] = img[strings.LastIndex(img, `\`)+1:]
 			}
 		}
-	case strings.EqualFold(ev.System.Provider.Name, "Microsoft-Windows-Kernel-File") &&
-		!fileEventIDs[ev.System.EventID]:
-		id := strconv.Itoa(ev.System.EventID)
-		if _, seen := a.Schema[id]; !seen {
-			var names []string
-			for _, d := range ev.Data {
-				names = append(names, d.Name)
-			}
-			a.Schema[id] = strings.Join(names, ",")
+	case kernelFile && id == opEndEventID:
+		// OperationEnd runs in whatever context completed the IRP, so it is
+		// matched to its Create by Irp, never by its own process id.
+		if i, ok := a.pending[irp]; ok && irp != "" {
+			delete(a.pending, irp)
+			st, err := strconv.ParseUint(data["Status"], 0, 64)
+			a.ops[i].denied = err == nil && uint32(st) == statusAccessDenied
 		}
+	case kernelFile && !fileEventIDs[id]:
 		key := strings.ToLower(data["FileKey"])
 		if key == "" {
 			return
@@ -198,7 +227,7 @@ func (a *Attribution) add(ev etwEvent) {
 		if name := data["FileName"]; name != "" {
 			a.keyName[key] = strings.ToLower(name)
 		}
-		if handleEventIDs[ev.System.EventID] {
+		if handleEventIDs[id] {
 			pid, err := parseUint(ev.System.Execution.ProcessID)
 			if err != nil {
 				return
@@ -207,9 +236,10 @@ func (a *Attribution) add(ev etwEvent) {
 			if a.keyed[key] == nil {
 				a.keyed[key] = map[uint32]string{}
 			}
-			a.keyed[key][pid] = id
+			a.keyed[key][pid] = strconv.Itoa(id)
+			a.ops = append(a.ops, fileOp{pid: pid, id: id, path: a.foName[fo], key: key, write: true})
 		}
-	case strings.EqualFold(ev.System.Provider.Name, "Microsoft-Windows-Kernel-File"):
+	case kernelFile:
 		p := data["FileName"]
 		if p == "" {
 			p = data["FilePath"]
@@ -219,8 +249,49 @@ func (a *Attribution) add(ev etwEvent) {
 			return
 		}
 		a.byPID[pid]++
-		a.open(strings.ToLower(p), pid)
+		p = strings.ToLower(p)
+		a.open(p, pid)
+		op := fileOp{pid: pid, id: id, path: p, write: true}
+		if id == 12 {
+			op.write, op.unknown = createWrites(data["CreateOptions"])
+		}
+		if id == 12 || id == 30 {
+			if fo != "" {
+				a.foName[fo] = p
+			}
+			if irp != "" {
+				a.pending[irp] = len(a.ops)
+			}
+		}
+		a.ops = append(a.ops, op)
 	}
+}
+
+// The Kernel-File OperationEnd event (Irp, ExtraInformation, Status), and the
+// NTSTATUS a denied open completes with (ntstatus.h, STATUS_ACCESS_DENIED).
+const (
+	opEndEventID       = 24
+	statusAccessDenied = 0xC0000022
+)
+
+// createWrites reads a Create event's CreateOptions: the IRP_MJ_CREATE
+// Parameters.Create.Options value, whose high 8 bits are the CreateDisposition
+// and low 24 bits the create options (learn.microsoft.com/windows-hardware/
+// drivers/ifs/irp-mj-create; the kernel logger's FileIo_Create documents the
+// same packing). Any disposition but FILE_OPEN (1) can create or overwrite
+// (wdm.h: SUPERSEDE 0, OPEN 1, CREATE 2, OPEN_IF 3, OVERWRITE 4, OVERWRITE_IF 5),
+// and FILE_DELETE_ON_CLOSE (0x1000) deletes. A plain FILE_OPEN is not a write
+// by itself; what it then does through the handle is traced as Write,
+// SetInformation, SetDelete or Rename. The trace does not carry the access
+// requested, so an open for write that writes nothing is invisible here — the
+// deny ACE is what stops it, and a denied open is caught by its status.
+func createWrites(opts string) (write, unknown bool) {
+	v, err := strconv.ParseUint(opts, 0, 32)
+	if err != nil {
+		return true, true // fail closed
+	}
+	const fileOpen, fileDeleteOnClose = 1, 0x1000
+	return v>>24 != fileOpen || v&fileDeleteOnClose != 0, false
 }
 
 // open records that pid acted on a full NT path, if that path is on C:.
@@ -238,6 +309,11 @@ func (a *Attribution) open(p string, pid uint32) {
 // resolveKeys turns handle-based writes into path attributions once every
 // FileKey the trace named is known. A key nobody named is kept as evidence.
 func (a *Attribution) resolveKeys() {
+	for i := range a.ops {
+		if a.ops[i].path == "" {
+			a.ops[i].path = a.keyName[a.ops[i].key]
+		}
+	}
 	for key, pids := range a.keyed {
 		name, ok := a.keyName[key]
 		for pid, id := range pids {
