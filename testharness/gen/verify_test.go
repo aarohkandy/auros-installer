@@ -137,3 +137,33 @@ func between(t *testing.T, s, start, end string) string {
 	}
 	return strings.TrimSpace(s[i+len(start) : j])
 }
+
+// The LocalAppData hazards are not data, so they are not in the golden manifest; the plan is the only
+// place a runner can learn that the installer was made to meet them. A plan without them is a Gate 3
+// that is blind to SYSTEM-REVIEW §2.20 again.
+func TestPlanNamesTheLocalAppDataJunctionsAndTheDeniedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := cmdGenerate([]string{"-seed", "7", "-root", `C:\Users\student`, "-count", "200",
+		"-profile", "compact", "-manifest-only", "-manifest-dir", dir}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "corpus-plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p Plan
+	if err := json.Unmarshal(b, &p); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`C:\Users\student\AppData\Local\Application Data`,
+		`C:\Users\student\AppData\Local\History`,
+		`C:\Users\student\AppData\Local\Temporary Internet Files`,
+	}
+	if strings.Join(p.Junctions, "|") != strings.Join(want, "|") {
+		t.Errorf("junctions = %q, want %q", p.Junctions, want)
+	}
+	if len(p.DenyACLDirs) != 1 || !strings.HasPrefix(p.DenyACLDirs[0], `C:\Users\student\AppData\Local\`) {
+		t.Errorf("deny_acl_dirs = %q, want one directory under LocalAppData", p.DenyACLDirs)
+	}
+}

@@ -314,3 +314,33 @@ func DefaultSynthetic(sysMount, destMount string) SyntheticConfig {
 		},
 	}
 }
+
+// Reparse tags this package names. Values from ntifs.h, as listed on
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4
+const (
+	ReparseTagMountPoint  uint32 = 0xA0000003 // IO_REPARSE_TAG_MOUNT_POINT: junctions and volume mount points
+	ReparseTagSymlink     uint32 = 0xA000000C // IO_REPARSE_TAG_SYMLINK
+	ReparseTagAppExecLink uint32 = 0x8000001B // IO_REPARSE_TAG_APPEXECLINK: %LOCALAPPDATA%\Microsoft\WindowsApps aliases
+
+	// reparseTagNameSurrogate is the bit IsReparseTagNameSurrogate tests: "the
+	// reparse point is a surrogate for another named entity (for example, a
+	// mounted folder)".
+	// https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-isreparsetagnamesurrogate
+	reparseTagNameSurrogate uint32 = 0x20000000
+)
+
+// IsLinkTag reports whether a reparse tag makes the file a LINK — a name for
+// something stored elsewhere — rather than data.
+//
+// A junction or symbolic link is a pointer: following it copies the target a
+// second time (LocalAppData\Application Data points back at LocalAppData
+// itself) or leaves the tree altogether. An app execution alias is a pointer to
+// a packaged program and has no readable content of its own.
+//
+// Everything else is NOT a link, and that is the half that matters: OneDrive's
+// cloud-file tags (IO_REPARSE_TAG_CLOUD_*), dedup and similar tags sit on files
+// whose bytes are the user's data, so they must never be waved through as
+// "not data".
+func IsLinkTag(tag uint32) bool {
+	return tag&reparseTagNameSurrogate != 0 || tag == ReparseTagAppExecLink
+}

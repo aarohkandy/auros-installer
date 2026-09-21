@@ -216,3 +216,28 @@ func TestDefaultSynthetic_IsTheAwkwardMachineNotTheEasyOne(t *testing.T) {
 		t.Error("the fixture's destination is not removable; the case we sell is a USB stick")
 	}
 }
+
+// A junction or symlink is a link; a OneDrive cloud file is DATA even though it
+// is also a reparse point. Calling a cloud file "not data" would skip the
+// user's files and say so politely.
+func TestIsLinkTag_LinksAreLinksAndCloudFilesAreNever(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tag  uint32
+		want bool
+	}{
+		{"junction (IO_REPARSE_TAG_MOUNT_POINT)", 0xA0000003, true},
+		{"symbolic link (IO_REPARSE_TAG_SYMLINK)", 0xA000000C, true},
+		{"app execution alias (IO_REPARSE_TAG_APPEXECLINK)", 0x8000001B, true},
+		{"WSL symlink (IO_REPARSE_TAG_LX_SYMLINK)", 0xA000001D, true},
+		{"not a reparse point", 0, false},
+		{"OneDrive cloud file (IO_REPARSE_TAG_CLOUD_6)", 0x9000601A, false},
+		{"OneDrive (IO_REPARSE_TAG_ONEDRIVE)", 0x80000021, false},
+		{"dedup (IO_REPARSE_TAG_DEDUP)", 0x80000013, false},
+		{"projected file (IO_REPARSE_TAG_PROJFS)", 0x9000001C, false},
+	} {
+		if got := IsLinkTag(c.tag); got != c.want {
+			t.Errorf("%s: IsLinkTag(%#x) = %v, want %v", c.name, c.tag, got, c.want)
+		}
+	}
+}

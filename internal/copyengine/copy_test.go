@@ -196,9 +196,10 @@ func TestCopy_RefusesALabelThatEscapes(t *testing.T) {
 	e.assertSystemDiskUntouched(t)
 }
 
-func TestCopy_SymlinkEscapingTheRootIsQuarantinedNotFollowed(t *testing.T) {
+// A link out of the source tree and onto the system disk. It is not followed,
+// not copied, and not quarantined: it is reported, with its target, as a link.
+func TestCopy_SymlinkEscapingTheRootIsReportedNotFollowedNotQuarantined(t *testing.T) {
 	e := newEnv(t, map[string]string{"ok.txt": "fine"})
-	// A link out of the source tree and onto the system disk.
 	target := filepath.Join(e.sys, "Users", "pat", "thesis.odt")
 	link := filepath.Join(e.src, "escape.lnk")
 	if err := os.Symlink(target, link); err != nil {
@@ -214,19 +215,15 @@ func TestCopy_SymlinkEscapingTheRootIsQuarantinedNotFollowed(t *testing.T) {
 	if _, ok := res.Manifest.Lookup("Documents/escape.lnk"); ok {
 		t.Error("the escaping link was copied into the archive")
 	}
-	if !hasReason(e.q, "Documents/escape.lnk", quarantine.ReasonPathEscape) {
-		t.Errorf("the escaping link was not quarantined as a path escape: %+v", e.q.Records())
-	}
-	if e.q.Unresolved() == 0 {
-		t.Error("an unfollowed link must leave an unresolved record, so the run cannot reach the wall")
-	}
+	assertLinkReported(t, e, res, "Documents/escape.lnk", target)
 	e.assertSystemDiskUntouched(t)
 }
 
-func TestCopy_SymlinkInsideTheRootIsReportedNotFollowed(t *testing.T) {
+func TestCopy_SymlinkInsideTheRootIsReportedNotFollowedNotQuarantined(t *testing.T) {
 	e := newEnv(t, map[string]string{"real.txt": "content"})
+	target := filepath.Join(e.src, "real.txt")
 	link := filepath.Join(e.src, "alias.txt")
-	if err := os.Symlink(filepath.Join(e.src, "real.txt"), link); err != nil {
+	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	res, err := Run(context.Background(), e.opts())
@@ -236,10 +233,33 @@ func TestCopy_SymlinkInsideTheRootIsReportedNotFollowed(t *testing.T) {
 	if res.Copied != 1 {
 		t.Errorf("copied = %d, want 1", res.Copied)
 	}
-	if !hasReason(e.q, "Documents/alias.txt", quarantine.ReasonUnsupportedType) {
-		t.Errorf("the link was not reported: %+v", e.q.Records())
-	}
+	assertLinkReported(t, e, res, "Documents/alias.txt", target)
 	e.assertSystemDiskUntouched(t)
+}
+
+// assertLinkReported: a link is in the report as "not copied: link, not data"
+// with its target, is NOT a quarantine record, and does not block the wall.
+func assertLinkReported(t *testing.T, e *env, res *Result, path, target string) {
+	t.Helper()
+	found := false
+	for _, l := range res.Links {
+		if l.Path == path && l.Target == target {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("link %s -> %s is not in the report: %+v", path, target, res.Links)
+	}
+	if inQuarantine(e.q, path) {
+		t.Errorf("a link was quarantined; it is not data and there is nothing to recover: %+v", e.q.Records())
+	}
+	if n := e.q.Unresolved(); n != 0 {
+		t.Errorf("unresolved = %d: a link must not stop the run at the wall", n)
+	}
+	d := res.Describe()
+	if !strings.Contains(d, "not copied: link, not data") || !strings.Contains(d, path+" -> "+target) {
+		t.Errorf("the printed report does not name the link:\n%s", d)
+	}
 }
 
 func TestCopy_SourceDisappearsBeforeItIsCopied(t *testing.T) {

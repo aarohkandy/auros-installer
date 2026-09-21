@@ -188,6 +188,63 @@ type Plan struct {
 	ADSFiles       int      `json:"ads_files"`
 	LongPathFiles  int      `json:"long_path_files"`
 	NearMaxPath    int      `json:"near_max_path_files"`
+
+	// Junctions and DenyACLDirs are the LocalAppData hazards (see localAppDataLinks). They are not
+	// in the golden manifest — they are not data — so they are listed here, where a runner can
+	// assert the installer met them.
+	Junctions   []string `json:"junctions"`
+	DenyACLDirs []string `json:"deny_acl_dirs"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// LOCALAPPDATA HAZARDS — SYSTEM-REVIEW §2.20
+//
+// A real profile's LocalAppData carries legacy compatibility JUNCTIONS (Vista onwards) whose own ACL
+// denies Everyone the right to list them, and "Application Data" points back at LocalAppData itself.
+// A corpus without them cannot see what a copy engine does with a reparse point, which is the one
+// thing that decides whether a run on a real machine can finish. So they are made for real — actual
+// IO_REPARSE_TAG_MOUNT_POINT junctions, actual deny ACEs — and so is one plain directory the user
+// cannot list, which a copy engine must stop on rather than skip.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+var localAppDataLinks = []struct{ link, target string }{
+	{"AppData/Local/Application Data", "AppData/Local"},
+	{"AppData/Local/History", "AppData/Local/Microsoft/Windows/History"},
+	{"AppData/Local/Temporary Internet Files", "AppData/Local/Microsoft/Windows/INetCache"},
+}
+
+// localAppDataDenied is honest about being synthetic: there is no one folder every real profile has
+// that the user cannot read, only the certainty that some machines have one.
+const localAppDataDenied = "AppData/Local/auros-deny-acl-fixture"
+
+// writeLocalAppDataHazards runs after every file is written: a deny ACE placed first would stop the
+// generator writing the corpus underneath it.
+func writeLocalAppDataHazards(winRoot string, faithful *bool) error {
+	for _, l := range localAppDataLinks {
+		target := localPath(winRoot, l.target)
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return err
+		}
+		link := localPath(winRoot, l.link)
+		if err := platMakeJunction(link, target); err != nil {
+			if errors.Is(err, errNotSupported) {
+				*faithful = false
+				return nil
+			}
+			return fmt.Errorf("junction %s: %w", link, err)
+		}
+		if err := platDenyList(link); err != nil {
+			return fmt.Errorf("deny ACL on junction %s: %w", link, err)
+		}
+	}
+	denied := localPath(winRoot, localAppDataDenied)
+	if err := os.MkdirAll(denied, 0o755); err != nil {
+		return err
+	}
+	if err := platDenyList(denied); err != nil {
+		return fmt.Errorf("deny ACL on %s: %w", denied, err)
+	}
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -561,6 +618,10 @@ func cmdGenerate(args []string) error {
 	}
 
 	p := Plan{Harness: HarnessVersion, Seed: *seed, CorpusDigest: digest}
+	for _, l := range localAppDataLinks {
+		p.Junctions = append(p.Junctions, winPath(*root, l.link))
+	}
+	p.DenyACLDirs = []string{winPath(*root, localAppDataDenied)}
 	for i := range recs {
 		if recs[i].LockedAtRuntime {
 			p.LockedFiles = append(p.LockedFiles, recs[i].WinPath)
@@ -1092,6 +1153,10 @@ func writeCorpus(seed uint64, winRoot string, recs []FileRec, faithful *bool, no
 			}
 			*faithful = false
 		}
+	}
+
+	if err := writeLocalAppDataHazards(winRoot, faithful); err != nil {
+		return err
 	}
 
 	if !*faithful {
