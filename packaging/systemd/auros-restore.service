@@ -1,0 +1,76 @@
+# A systemd USER unit: it runs once, on the first graphical login, and then
+# gets out of the way.
+#
+# "Once" is the stamp file, not a flag. ConditionPathExists=! makes systemd
+# skip the unit entirely when the stamp is there, so a machine that has already
+# restored does no work at login and the user sees nothing.
+#
+# The stamp is written ONLY by a clean run (see cmd/auros-restore). That is
+# deliberate and it is the answer to the most likely real failure on a school
+# laptop: the USB stick was not plugged in yet. A run that found no archive
+# exits 0, says nothing, writes no stamp, and tries again at the next login.
+#
+# Install to: /usr/lib/systemd/user/auros-restore.service
+# Enable for every account in the image with:
+#   systemctl --global enable auros-restore.service
+#
+# NOT enabled by `systemctl --user enable` in a %post: there is no user session
+# during an image build, and a unit enabled into a skeleton home directory is
+# a unit that silently does not exist for an account created later.
+
+[Unit]
+Description=Bring your files across from your old Windows computer
+# Not a man page: there isn't one. `systemd-analyze verify` catches a
+# Documentation= that points at nothing, which is how this line was found
+# claiming a manual that was never written.
+Documentation=https://github.com/aarohkandy/auros-installer
+
+# %S is $XDG_STATE_HOME for a user unit — ~/.local/state — which is the same
+# directory cmd/auros-restore writes its stamp to. If one of them moves, this
+# unit runs every login forever, so they are named together here on purpose.
+ConditionPathExists=!%S/auros-restore/done
+
+# After, not Requires: a desktop that never reaches graphical-session.target is
+# a broken desktop, and failing to restore is not the way to tell the user.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+
+# --quiet because nobody is looking at this unit's stdout. The report goes on
+# the desktop and the pop-up goes on the session bus; the journal is for
+# whoever comes afterwards.
+ExecStart=/usr/libexec/auros/auros-restore --quiet
+
+# A failed restore is a thing for a person to look at — there is a note on the
+# desktop naming every file — not a thing to retry in a loop. Restarting would
+# re-read the whole archive and re-notify, on a ten-year-old laptop, while the
+# user is trying to read the note explaining what went wrong.
+Restart=no
+
+# The user's only copy of their data is on the archive. Give the process the
+# smallest surface that still lets it read a USB stick and write a home
+# directory. ProtectSystem=strict is deliberately NOT used: a run started by an
+# administrator as root writes NetworkManager keyfiles into /etc, and a unit
+# that silently could not would be the worst kind of quiet failure.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# 18,000 small files on a 2013 laptop, read three times. Slow is fine; being
+# killed part way through is not, and the restore is safe to re-run anyway.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=graphical-session.target
