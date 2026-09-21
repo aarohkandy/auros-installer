@@ -206,6 +206,8 @@ func cmdRun(args []string) error {
 	timeout := fs.Duration("timeout", 45*time.Minute, "how long the installer gets before it is killed")
 	profile := fs.String("profile", "realistic", "the corpus profile, for the record")
 	seed := fs.Uint64("seed", 0, "the corpus seed, for the record")
+	settleQuiet := fs.Duration("settle-quiet", gate3.DefaultSettleQuiet, "how long C: must go without a change outside the noise list before measuring")
+	settleMax := fs.Duration("settle-max", gate3.DefaultSettleMax, "fail the run as not quiescent if C: has not settled by then")
 	noFormat := fs.Bool("no-format", false, "do not wipe the destination volume first (for debugging only)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -255,7 +257,8 @@ func cmdRun(args []string) error {
 		User: *user, Password: strings.TrimSpace(string(pw)),
 		WorkDir: filepath.Join(*work, id), Timeout: *timeout,
 		Profile: *profile, Seed: *seed, Faithful: true,
-		Image: os.Getenv("ImageOS") + " " + os.Getenv("ImageVersion"),
+		Image:       os.Getenv("ImageOS") + " " + os.Getenv("ImageVersion"),
+		SettleQuiet: *settleQuiet, SettleMax: *settleMax,
 	}
 	res, err := gate3.RunOnce(cfg)
 	if err != nil {
