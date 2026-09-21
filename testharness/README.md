@@ -13,8 +13,20 @@ Spec §6C is the binary exit condition for Gate 3:
 > mismatch) — 20 clean aborts, Windows still boots normally every time, zero data loss.
 > **The abort path is tested more than the happy path.**
 
-**No suite has been run.** There are no results in this repository and `REPORT.md` is an unfilled
-template. BLOCKED.md B1 — a VM host with room — is open.
+**Two harnesses live here, and only one of them has ever run.**
+
+- **[`gate3/`](gate3/README.md) — the one that runs.** It drives the real `auros-migrate` CLI on an
+  ephemeral `windows-latest` runner (DECISIONS.md D27), measures the system disk through the NTFS
+  change journal, and re-hashes both trees against this generator's golden manifest. It is what
+  `.github/workflows/gate3.yml` executes, and its results are the only Gate 3 evidence this repository
+  has.
+- **`runner/` — the QEMU harness described in the rest of this file.** Still unrun: BLOCKED.md B1, a VM
+  host with room, is open, and `REPORT.md` is an unfilled template. It remains the only design that can
+  answer the part of §6C that gate3 cannot — booting the machine afterwards, real power cuts with
+  `cache.direct=on`, and firmware.
+
+Everything below describes `runner/`. `gen/` and `fault/` are shared: `gate3/` uses `gen`'s corpus and
+golden manifest unchanged, and the §4.7 harness token is the same `fault.Token`.
 
 ---
 
