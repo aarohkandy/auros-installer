@@ -22,3 +22,7 @@ func New() Env {
 
 // Available reports whether the real Windows surface is present.
 func Available() bool { return false }
+
+// ReparseTag is the Windows reparse tag of path itself. Off Windows there are no
+// reparse points, and a link is already visible as fs.ModeSymlink.
+func ReparseTag(path string) (uint32, error) { return 0, nil }

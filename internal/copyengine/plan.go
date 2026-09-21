@@ -12,6 +12,7 @@ import (
 
 	"github.com/aarohkandy/auros-installer/internal/manifest"
 	"github.com/aarohkandy/auros-installer/internal/quarantine"
+	"github.com/aarohkandy/auros-installer/internal/winenv"
 )
 
 // Source is one tree to copy. Label becomes the first path segment at the
@@ -49,7 +50,7 @@ type planned struct {
 // on a ten-year-old disk is normal; aborting the entire inventory because of one
 // of them produces a tool that never gets past the first bad sector, and a tool
 // that cannot finish is a tool people route around.
-func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) {
+func plan(ctx context.Context, o Options, q *quarantine.Set, links *[]Link) ([]planned, error) {
 	if len(o.Sources) == 0 {
 		return nil, ErrNoSources
 	}
@@ -75,13 +76,6 @@ func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) 
 		}
 		if under(destAbs, rootAbs) {
 			return nil, fmt.Errorf("%w: %s is inside %s", ErrDestinationInsideSource, destAbs, rootAbs)
-		}
-
-		// Resolve the root through any symlinks once, so escape detection
-		// compares real paths against a real path.
-		rootReal, rerr := filepath.EvalSymlinks(rootAbs)
-		if rerr != nil {
-			rootReal = rootAbs
 		}
 
 		werr := filepath.WalkDir(rootAbs, func(p string, d fs.DirEntry, err error) error {
@@ -111,11 +105,18 @@ func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) 
 			}
 			logical := label + "/" + rel
 
-			// A symlink is never followed. WalkDir uses Lstat, so a symlinked
-			// directory is not descended into either.
-			if d.Type()&fs.ModeSymlink != 0 {
-				reason, detail := classifySymlink(p, rootReal)
-				q.Add(quarantine.Record{Path: logical, Reason: reason, Detail: detail, Attempts: 1})
+			// A link is a pointer, not data, and it is never followed: following
+			// LocalAppData\Application Data walks LocalAppData again, and a link
+			// out of the tree copies C:\Windows or a network share. It is not
+			// quarantined either — there is nothing here to recover, and an
+			// unresolved record per legacy junction is a run that can never
+			// reach the wall (SYSTEM-REVIEW §2.20). It is REPORTED, with its
+			// target, as "not copied: link, not data".
+			if isLink(p, d) {
+				*links = append(*links, Link{Path: logical, Target: linkTarget(p)})
+				if d.IsDir() {
+					return fs.SkipDir
+				}
 				return nil
 			}
 			if d.IsDir() {
@@ -193,18 +194,39 @@ func plan(ctx context.Context, o Options, q *quarantine.Set) ([]planned, error) 
 	return out, nil
 }
 
-// classifySymlink decides whether a link leaves the tree. A link pointing
-// outside the source root is how a copy of "Documents" turns into a copy of
-// C:\Windows, or of a network share, or of itself.
-func classifySymlink(p, rootReal string) (quarantine.Reason, string) {
-	target, err := filepath.EvalSymlinks(p)
+// Link is a name that points somewhere else. It is reported and not copied.
+type Link struct {
+	Path   string // "<label>/<path>", as it would have appeared in the archive
+	Target string // where it points, or why that could not be read
+}
+
+// isLink reports whether the entry is a junction, a symbolic link or an app
+// execution alias.
+//
+// Go (1.23+) reports a symbolic link as ModeSymlink and every other reparse
+// point — junctions included — as ModeIrregular, never as a directory, so
+// WalkDir does not descend into either. ModeIrregular also covers OneDrive's
+// cloud files, which ARE data, so for those the reparse tag decides. If the tag
+// cannot be read the entry is not called a link and falls through to the
+// quarantine below: when in doubt, stop, never skip.
+func isLink(p string, d fs.DirEntry) bool {
+	t := d.Type()
+	if t&fs.ModeSymlink != 0 {
+		return true
+	}
+	if t&fs.ModeIrregular == 0 {
+		return false
+	}
+	tag, err := winenv.ReparseTag(p)
+	return err == nil && winenv.IsLinkTag(tag)
+}
+
+func linkTarget(p string) string {
+	t, err := os.Readlink(p)
 	if err != nil {
-		return quarantine.ReasonReadError, "dangling or unreadable link: " + err.Error()
+		return "(target unreadable: " + err.Error() + ")"
 	}
-	if !under(target, rootReal) {
-		return quarantine.ReasonPathEscape, "link points outside the source tree, to " + target
-	}
-	return quarantine.ReasonUnsupportedType, "symbolic link to " + target + " (links are reported, never followed)"
+	return t
 }
 
 // under reports whether p is root or is contained in root. It compares cleaned
