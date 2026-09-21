@@ -205,6 +205,7 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	out, _ := os.ReadFile(outPath)
 	stdout := string(out)
 	res.LogTail = tail(stdout, 6000)
+	res.AttachOutput(stdout)
 	res.Inventory = InventoryLines(stdout)
 	if sc != nil && sc.Dest == DestAuto {
 		if d := chosenDestination(stdout); d != "" {

@@ -79,6 +79,11 @@ var noiseRules = []NoiseRule{
 		Why: "the certificate-revocation cache, written by whichever process last validated a certificate"},
 	{Pattern: `^c:\\windows\\system32\\smi\\store\\`, Why: "the component store's database, written by servicing"},
 	{Pattern: `^c:\\windows\\apppatch\\`, Why: "the application-compatibility database"},
+	{Pattern: `^c:\\windows\\systemtemp\\`, Why: "the temp directory Windows' own services use"},
+	{Pattern: `^c:\\windows\\system32\\tasks\\microsoft\\windows\\`,
+		Why: "the last-run bookkeeping of WINDOWS' OWN scheduled tasks. Narrowed to Microsoft\\Windows: a " +
+			"task installed anywhere else — which is what a tool that wanted to survive a reboot would " +
+			"do — is still reported"},
 	{Pattern: `^c:\\programdata\\microsoft\\(diagnosticlogcsp|provisioning|windows\\clipsvc)\\`,
 		Why: "the diagnostic-log collector and the provisioning sequence, both of which Windows runs on " +
 			"its own schedule"},

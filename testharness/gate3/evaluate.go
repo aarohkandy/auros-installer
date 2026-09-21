@@ -351,7 +351,11 @@ func evidenceSeen(r *Result, sc *Scenario) string {
 		hay.WriteString(strings.Join(r.Quarantine.Head, "\n"))
 	}
 	hay.WriteString("\n")
-	hay.WriteString(r.LogTail)
+	if r.stdout != "" {
+		hay.WriteString(r.stdout)
+	} else {
+		hay.WriteString(r.LogTail)
+	}
 	text := strings.ToLower(hay.String())
 	for _, want := range sc.AbortEvidence {
 		if strings.Contains(text, strings.ToLower(want)) {

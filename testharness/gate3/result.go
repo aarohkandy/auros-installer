@@ -118,7 +118,16 @@ type Result struct {
 	// against. It is not serialised: a result file records measurements, and the
 	// corpus it was measured against is named by its digest above.
 	manifestGolden *Golden
+
+	// stdout is everything the installer printed. Only the tail is serialised —
+	// a run that quarantines eighteen thousand files prints megabytes — but the
+	// whole of it is searched for the evidence a scenario requires, because on
+	// exactly those runs the sentence that matters is at the top.
+	stdout string
 }
+
+// AttachOutput keeps the installer's full output for the evidence search.
+func (r *Result) AttachOutput(s string) { r.stdout = s }
 
 // FireRecord is the anti-vacuous-pass evidence: a scenario that never fired
 // produces a run that looks exactly like a pass.

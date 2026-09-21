@@ -267,7 +267,8 @@ func Suite() []Scenario {
 			ID: "F06", Family: "dest_removed", Name: "Destination volume yanked during VERIFY",
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseVerify, BP: 4000,
 			Action: ActionDismountDestination, Expect: ExpectAbort,
-			AbortEvidence: []string{"missing-at-destination", "read-error", "unreadable", "size-mismatch"},
+			AbortEvidence: []string{"missing-at-destination", "missing-from-destination", "read-error",
+				"unreadable", "size-mismatch", "size-differs"},
 			Why: "Verification reads from the destination. Losing it mid-verify must abort, not be " +
 				"treated as 'the files we already checked were fine'.",
 			WrongReason: "Counting the files verified so far as a pass satisfies a naive count check " +
@@ -279,7 +280,7 @@ func Suite() []Scenario {
 			ID: "F07", Family: "dest_full", Name: "Destination fills at 61% of the copy",
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseCopy, BP: 6100,
 			Action: ActionFillDestination, Expect: ExpectAbort,
-			AbortEvidence: []string{"destination-full"},
+			AbortEvidence: []string{"destination-full", "filled up", "not enough space on the disk"},
 			Why: "The free-space check in phase 3 happens once, before the copy. Anything that eats space " +
 				"during the copy defeats it — a Windows update, a second user, an underestimated " +
 				"placeholder hydration.",
@@ -290,7 +291,7 @@ func Suite() []Scenario {
 			ID: "F08", Family: "dest_full", Name: "Destination fills on the very last file",
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseCopy, BP: 9950,
 			Action: ActionFillDestination, Expect: ExpectAbort,
-			AbortEvidence: []string{"destination-full"},
+			AbortEvidence: []string{"destination-full", "filled up", "not enough space on the disk"},
 			Why: "One file short of complete. The count check passes for 17,999 of 18,000 and the only " +
 				"thing between the user and a lost file is that 18,000 != 17,999.",
 			WrongReason: "A percentage-based success threshold would pass this. There is no threshold.",
@@ -301,7 +302,7 @@ func Suite() []Scenario {
 			ID: "F09", Family: "source_mutated", Name: "Source file rewritten repeatedly while it is copied",
 			Dest: DestNormal, Trigger: TriggerPartial, Phase: PhaseCopy, BP: 2900,
 			Action: ActionMutateSource, TargetDeltaBytes: 0, DeviatesSource: true, Expect: ExpectAbort,
-			AbortEvidence: []string{"source-changed-during-copy"},
+			AbortEvidence: []string{"source-changed-during-copy", "changed during the copy"},
 			Why: "A live machine: a document open in an application that saves every few seconds, or a " +
 				"sync client rewriting a file under the copy. Phase 4 hashes DURING the copy for this " +
 				"exact reason, and phase 5's one retry is allowed to fail here — the file never holds " +
@@ -317,7 +318,7 @@ func Suite() []Scenario {
 			ID: "F11", Family: "source_deleted", Name: "Source file deleted just ahead of the copy",
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseCopy, BP: 3300,
 			Action: ActionDeleteSource, TargetDeltaBytes: ahead, DeviatesSource: true, Expect: ExpectAbort,
-			AbortEvidence: []string{"source-disappeared"},
+			AbortEvidence: []string{"source-disappeared", "disappeared during the copy", "source file disappeared"},
 			Why: "Temp files, browser cache, a user emptying Downloads while the tool runs. The inventory " +
 				"is a snapshot; the disk is not.",
 			WrongReason: "Treating a vanished source as 'nothing to copy' silently reduces the expected " +
@@ -327,7 +328,7 @@ func Suite() []Scenario {
 			ID: "F12", Family: "source_deleted", Name: "Source file deleted long before its copy begins",
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseCopy, BP: 100,
 			Action: ActionDeleteSource, TargetDeltaBytes: aheadFar, DeviatesSource: true, Expect: ExpectAbort,
-			AbortEvidence: []string{"source-disappeared"},
+			AbortEvidence: []string{"source-disappeared", "disappeared during the copy", "source file disappeared"},
 			Why:           "Same family, widest possible gap between the acknowledged inventory and the copy.",
 			WrongReason: "Re-enumerating at copy time instead of using the inventory the user " +
 				"acknowledged would make this pass while quietly breaking phase 2.",
@@ -390,7 +391,7 @@ func Suite() []Scenario {
 			ID: "F22", Family: "count_mismatch", Name: "A file the manifest does not know about appears in the archive",
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseCopy, BP: 9900,
 			Action: ActionPlantExtra, DeviatesArchive: true, Expect: ExpectAbort,
-			AbortEvidence: []string{"unexpected-file-at-destination"},
+			AbortEvidence: []string{"unexpected-file-at-destination", "unexpected-at-destination"},
 			Why: "Every hash is fine and the count is wrong. The destination is not the archive the " +
 				"manifest describes, and a restore would either copy a stranger's file onto the new " +
 				"machine or silently ignore it.",
@@ -403,7 +404,7 @@ func Suite() []Scenario {
 			ID: "F19", Family: "av_lock", Name: "Exclusive handle on a source file the copy has not reached",
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseCopy, BP: 2200,
 			Action: ActionLockSource, TargetDeltaBytes: ahead, Expect: ExpectAbort,
-			AbortEvidence: []string{"locked-or-in-use", "read-error"},
+			AbortEvidence: []string{"locked-or-in-use", "read-error", "being used by another process"},
 			Why: "Real-time scanning opens files with no sharing at all. On the machines this product " +
 				"exists for, the antivirus is the most aggressive thing installed.",
 			WrongReason: "Silently skipping the file is the failure: a skipped file plus a reduced " +
@@ -413,7 +414,7 @@ func Suite() []Scenario {
 			ID: "F20", Family: "av_lock", Name: "Exclusive handle on an archive file during VERIFY",
 			Dest: DestNormal, Trigger: TriggerBytes, Phase: PhaseVerify, BP: 6600,
 			Action: ActionLockArchive, TargetDeltaBytes: ahead, Expect: ExpectAbort,
-			AbortEvidence: []string{"read-error", "locked-or-in-use", "unreadable"},
+			AbortEvidence: []string{"read-error", "locked-or-in-use", "unreadable", "being used by another process"},
 			Why: "Verification re-reads every file from the destination. An antivirus scanning the " +
 				"freshly written archive holds some of them, and a file that cannot be read cannot be " +
 				"verified.",
@@ -456,7 +457,7 @@ func Suite() []Scenario {
 			ID: "G04", Family: "path_escape", Name: "A link inside the source tree points outside it",
 			Dest: DestNormal, Trigger: TriggerNone, Action: ActionNone, PlantSymlinkEscape: true,
 			Expect:        ExpectAbort,
-			AbortEvidence: []string{"path-escapes-source-root"},
+			AbortEvidence: []string{"path-escapes-source-root", "points outside the source tree"},
 			Why: "A link in Documents pointing at C:\\Windows is how a copy of a user's files turns into " +
 				"a copy of the operating system, or of a network share, or of itself.",
 			WrongReason: "Following it 'because it resolves' is the failure. Quarantining it and then " +

@@ -425,7 +425,9 @@ func Quiesce() []string {
 	}
 	// Whole folders of scheduled tasks, plus the named ones: the image's
 	// third-party updaters name their tasks with version numbers that change.
-	for _, folder := range []string{`\Mozilla\`, `\GoogleSystem\`} {
+	for _, folder := range []string{`\Mozilla\`, `\GoogleSystem\`,
+		`\Microsoft\Windows\Windows Defender\`, `\Microsoft\Windows\UpdateOrchestrator\`,
+		`\Microsoft\Windows\WindowsUpdate\`, `\Microsoft\Windows\Application Experience\`} {
 		out, _ := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
 			fmt.Sprintf("Get-ScheduledTask -TaskPath '%s*' -ErrorAction SilentlyContinue | "+
 				"Disable-ScheduledTask -ErrorAction SilentlyContinue | "+
