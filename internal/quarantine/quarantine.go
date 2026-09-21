@@ -162,12 +162,21 @@ func (s *Set) Clear(path string) {
 	delete(s.records, path)
 }
 
+// ReportFile is the name WriteReport's output is saved under, inside the
+// archive's metadata directory. The Linux restore reads it back (H11), so both
+// halves spell it from here.
+const ReportFile = "quarantine.txt"
+
+// NoneReport is the whole of the report when nothing was quarantined. The
+// restore compares against it to tell "nothing was left behind" from a list.
+const NoneReport = "No files were quarantined. Every file was copied and verified.\n"
+
 // WriteReport renders the human-facing list. This is what the user reads before
 // deciding, so it names files rather than counting them.
 func (s *Set) WriteReport(w io.Writer) error {
 	recs := s.Records()
 	if len(recs) == 0 {
-		_, err := io.WriteString(w, "No files were quarantined. Every file was copied and verified.\n")
+		_, err := io.WriteString(w, NoneReport)
 		return err
 	}
 	var b strings.Builder

@@ -315,6 +315,7 @@ func TestWall_NonDestructivePackagesAreClean(t *testing.T) {
 		"internal/quarantine": true,
 		"internal/runlog":     true,
 		"internal/winenv":     true,
+		"internal/labels":     true,
 	}
 	forbidden := map[string]bool{}
 	forbidden[sysdiskImport] = true

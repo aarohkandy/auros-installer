@@ -174,6 +174,117 @@ jobs:
             GOARCH=$arch go vet ./...
           done
 
+  prove-red:
+    name: prove-red (the checks are watched failing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      # DECISIONS.md D34 and D37. A green suite cannot tell you that its
+      # assertions would disagree with WRONG code, and this repository has
+      # already shipped three permanently-green checks and one aggregate gate
+      # that reported PASS on failing suites.
+      #
+      # tools/prove-red.sh reintroduces one specific defect at a time into a
+      # scratch copy and requires the suite that owns it to go red FOR THE
+      # STATED REASON — so a mutation that breaks the build incidentally is not
+      # scored as a catch.
+      #
+      # This job is not optional and it is not allowed to be skipped. A
+      # mutation that stops being caught means an assertion has gone vacuous,
+      # and the fix is the assertion, never the mutation.
+      - name: prove every check can fail
+        run: tools/prove-red.sh
+
+  dbus-e2e:
+    name: the desktop notification, against a real session bus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      # internal/deskbus's unit tests drive a fake bus built out of deskbus's
+      # OWN encoder. That proves the client is self-consistent and nothing
+      # else: if the D-Bus alignment rules are misunderstood, both halves
+      # misunderstand them identically and the suite is green while no real
+      # desktop ever shows the notification.
+      #
+      # This job is the independent decoder. A real dbus-daemon parses the
+      # header and a real org.freedesktop.Notifications service, through
+      # libdbus's own marshaller, decodes the body against the signature.
+      - name: install a session bus and a notification service
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus python3-dbus python3-gi
+
+      - name: send a notification through a real bus
+        run: tools/dbus-e2e/run.sh
+
+      # run.sh exits 0 when the tooling is absent, which is right for a
+      # laptop and wrong for CI: a job that silently proves nothing is the
+      # thing this repository keeps finding in its own code. Here the tooling
+      # was just installed, so its absence is a broken job.
+      - name: assert the job actually ran the test
+        run: |
+          tools/dbus-e2e/run.sh 2>&1 | tee /tmp/e2e.log
+          grep -q "decoded by libdbus" /tmp/e2e.log || {
+            echo "the end-to-end notification test did not run; this job proved nothing"
+            exit 1
+          }
+
+  build-linux:
+    name: build linux/amd64 (the restore)
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      # The Linux half of the migration. Static, no cgo, no external modules:
+      # it is copied into the bootc image at /usr/libexec/auros/auros-restore
+      # and has to run on whatever glibc that image ships.
+      - name: build
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" \
+            -o dist/auros-restore-linux-amd64 ./cmd/auros-restore
+          ls -l dist
+
+      - name: it must run and refuse politely with no archive attached
+        # A smoke test that is a real assertion: with no archive anywhere, the
+        # exit status is 0 and nothing scary is printed, because a fresh Auros
+        # laptop that was never migrated must not warn its owner about a backup
+        # they never made. --require-archive flips that, and is what the image
+        # build uses to prove the binary works at all.
+        run: |
+          out="$(dist/auros-restore-linux-amd64 --archive /nonexistent --require-archive 2>&1 || true)"
+          echo "$out"
+          echo "$out" | grep -q "no archive" || {
+            echo "the refusal does not say what is wrong"; exit 1; }
+          dist/auros-restore-linux-amd64 --archive /nonexistent --require-archive && {
+            echo "--require-archive returned 0 with no archive"; exit 1; } || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: auros-restore-linux-amd64
+          path: dist/auros-restore-linux-amd64
+          if-no-files-found: error
+          retention-days: 30
+
   vuln:
     name: govulncheck
     runs-on: ubuntu-24.04

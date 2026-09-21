@@ -363,7 +363,7 @@ copyLoop:
 	if werr := saveManifest(res.Manifest, res.ManifestPath); werr != nil {
 		return res, fmt.Errorf("copyengine: writing manifest: %w", werr)
 	}
-	if werr := writeQuarantineReport(q, filepath.Join(metaPath, "quarantine.txt")); werr != nil {
+	if werr := writeQuarantineReport(q, filepath.Join(metaPath, quarantine.ReportFile)); werr != nil {
 		logEvent(o.Log, "warn", runlog.Fields{"stage": "quarantine-report", "error": werr.Error()})
 	}
 	logEvent(o.Log, "complete", runlog.Fields{

@@ -43,6 +43,22 @@ const (
 	// FileName is the manifest's name inside MetaDir.
 	FileName = "manifest.tsv"
 
+	// ArchiveSubdir is the folder the Windows half creates on the destination
+	// volume and writes MetaDir inside. A stick therefore carries
+	// <mount>/auros-backup/_auros/manifest.tsv, not <mount>/_auros/manifest.tsv.
+	//
+	// It lives HERE, next to MetaDir and FileName, because the two halves of
+	// the product are different programs built from different entry points and
+	// they have to agree on this string exactly. They did not: the Windows side
+	// passed the literal "auros-backup" to safety.Resolver.Choose and the Linux
+	// side's finder only ever looked at mount points and their parents, so a
+	// complete, intact archive was reported as "no backup drive is attached" —
+	// at the one moment when the Windows disk has already been overwritten and
+	// the stick is the only copy of the user's work.
+	//
+	// One name, one place, and a test in each half that pins it.
+	ArchiveSubdir = "auros-backup"
+
 	// EmptySHA256 is the digest of zero bytes. A 0-byte file is ordinary, not an
 	// error, and this is what its entry must carry.
 	EmptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
