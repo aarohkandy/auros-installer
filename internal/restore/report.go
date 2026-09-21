@@ -1,12 +1,18 @@
 package restore
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/aarohkandy/auros-installer/internal/manifest"
+	"github.com/aarohkandy/auros-installer/internal/quarantine"
 )
 
 // The report is the product.
@@ -144,6 +150,16 @@ func RenderReport(s *Summary, l *Layout) string {
 		w("Every one of them was checked twice: once on the backup drive")
 		w("before anything was copied, and once here after it was written.")
 		w("They match, file for file, byte for byte.")
+		if s.LeftBehind.Listed() {
+			w("")
+			w("NOT EVERYTHING WAS IN THE BACKUP. The Windows program could not copy")
+			w("some files from your old computer. They are named below, under")
+			w("%q.", leftBehindHeading)
+		}
+		w("")
+		w("KEEP THE BACKUP DRIVE (the USB stick) exactly as it is for now. It is")
+		w("the only other copy of these files. Do not wipe it or use it for")
+		w("anything else until you have opened the files that matter to you here.")
 	} else {
 		w("PLEASE READ — SOMETHING DID NOT GO AS PLANNED")
 		w("")
@@ -165,6 +181,12 @@ func RenderReport(s *Summary, l *Layout) string {
 
 	w("THE NUMBERS")
 	w("")
+	// No denominator is invented. The Windows half counts the old computer's
+	// files before copying but never writes that count to the stick, so the
+	// honest answer to "is that all of them?" is that the backup cannot say.
+	w("  on the old computer       not recorded in the backup, so this note")
+	w("                            cannot say whether the list below is all")
+	w("                            of them; see %q", leftBehindHeading)
 	w("  in the backup's list      %s", plural(s.ManifestCount, "file", "files"))
 	for _, o := range []Outcome{OutWritten, OutAlreadyPresent, OutPlacedAside, OutWithheld, OutHandled, OutFailed} {
 		if n := s.Counts[o]; n > 0 {
@@ -241,6 +263,36 @@ func RenderReport(s *Summary, l *Layout) string {
 		w("")
 		rule()
 	}
+
+	w("%s", leftBehindHeading)
+	w("")
+	lb := s.LeftBehind
+	switch {
+	case !lb.Found:
+		w("  The backup has no list of files the Windows program left behind")
+		w("  (%s is not on it),", lb.Path)
+		w("  so this note cannot say whether any were.")
+	case lb.Err != "":
+		w("  The list of files the Windows program left behind could not be")
+		w("  read: %s", lb.Err)
+		w("  It is at %s.", lb.Path)
+	case lb.None:
+		w("  None. The Windows program recorded that every file it found was")
+		w("  copied and verified.")
+	default:
+		w("  The Windows program wrote this list, from %s.", lb.Path)
+		w("  These files are NOT in the backup and NOT on this computer:")
+		w("")
+		for _, line := range strings.Split(strings.TrimRight(lb.Text, "\n"), "\n") {
+			w("    %s", line)
+		}
+		if lb.Cut {
+			w("")
+			w("  (The list is longer than this note shows. All of it is in the file above.)")
+		}
+	}
+	w("")
+	rule()
 
 	if s.PreVerify != nil && len(s.PreVerify.Disagreements) > 0 {
 		w("%s", preVerifyHeading)
@@ -394,6 +446,10 @@ func problems(s *Summary) []string {
 // dropped; this only decides where it is printed.
 const preVerifyInline = 12
 
+// leftBehindHeading is the section naming _auros/quarantine.txt, referenced
+// from the clean summary so the pointer and the section cannot drift apart.
+const leftBehindHeading = "LEFT BEHIND ON THE OLD COMPUTER"
+
 // preVerifyHeading is the section title, referenced from the summary so the
 // pointer and the section cannot drift apart.
 const preVerifyHeading = "EVERY FILE ON THE BACKUP THAT DID NOT CHECK OUT"
@@ -535,10 +591,72 @@ func NotifyBody(s *Summary) (summary, body string, urgent bool) {
 	if s.Clean() {
 		return "Your files are here",
 			fmt.Sprintf("%d files came across from your old computer, and every one was checked twice. "+
-				"There is a note on your desktop.", s.FilesRestored()),
+				"There is a note on your desktop. Keep your backup drive for now.", s.FilesRestored()),
 			false
 	}
 	return "Please read the note on your desktop",
 		"Some of your files need your attention. Your backup drive has not been changed.",
 		true
 }
+
+// LeftBehind is the Windows half's own list of files it could not copy or
+// verify: _auros/quarantine.txt. The manifest describes only what copied AND
+// verified, so without this file the report counts what arrived and is silent
+// about what never left (H11).
+type LeftBehind struct {
+	Path  string // where it was looked for
+	Found bool   // the file is on the stick
+	None  bool   // it says nothing was left behind
+	Text  string // its contents as written, cut at maxLeftBehind
+	Cut   bool   // Text was cut
+	Err   string // why it could not be read
+}
+
+// maxLeftBehind bounds what is copied into the report from the stick. The
+// stick is not trusted; the full list stays where it is.
+const maxLeftBehind = 256 << 10
+
+// ReadLeftBehind reads <archiveRoot>/_auros/quarantine.txt. Only a regular
+// file is read, and the one opened must be the one checked: under a root run
+// the report is handed to the user, and a link on the stick to /etc/shadow
+// must not be how its contents get there.
+func ReadLeftBehind(archiveRoot string) LeftBehind {
+	lb := LeftBehind{Path: filepath.Join(archiveRoot, manifest.MetaDir, quarantine.ReportFile)}
+	st, err := os.Lstat(lb.Path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return lb
+	}
+	lb.Found = true
+	if err != nil {
+		lb.Err = err.Error()
+		return lb
+	}
+	if !st.Mode().IsRegular() {
+		lb.Err = "it is not an ordinary file (" + st.Mode().Type().String() + "), so it was not read"
+		return lb
+	}
+	f, err := os.Open(lb.Path)
+	if err != nil {
+		lb.Err = err.Error()
+		return lb
+	}
+	defer f.Close()
+	if st2, err := f.Stat(); err != nil || !os.SameFile(st, st2) {
+		lb.Err = "it changed while it was being opened, so it was not read"
+		return lb
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxLeftBehind+1))
+	if err != nil {
+		lb.Err = err.Error()
+		return lb
+	}
+	if len(b) > maxLeftBehind {
+		b, lb.Cut = b[:maxLeftBehind], true
+	}
+	lb.Text = string(b)
+	lb.None = lb.Text == quarantine.NoneReport
+	return lb
+}
+
+// Listed reports whether the Windows half named files it left behind.
+func (lb LeftBehind) Listed() bool { return lb.Found && lb.Err == "" && !lb.None }

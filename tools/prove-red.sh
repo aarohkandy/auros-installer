@@ -303,6 +303,42 @@ m26() {
     '	{"LocalAppdata", guid{'
 }
 
+# ── M27 ───────────────────────────────────────────────────────────────────
+# SYSTEM-REVIEW §2.22 / H11, as shipped: _auros/quarantine.txt is on the stick
+# and nothing reads it, so a green report covers files that never left Windows.
+m27() {
+  mutate "$1/internal/restore/run.go" \
+    '		LeftBehind:    ReadLeftBehind(p.Archive.Root),' \
+    ''
+}
+
+# ── M27b ──────────────────────────────────────────────────────────────────
+# The clean branch stops telling the user to keep the stick — the shipped
+# state, where only the problem branch said the drive mattered.
+m27b() {
+  mutate "$1/internal/restore/report.go" \
+    '		w("KEEP THE BACKUP DRIVE (the USB stick) exactly as it is for now. It is")' \
+    ''
+}
+
+# ── M27c ──────────────────────────────────────────────────────────────────
+# The list is read through a link. Under a root run the report is handed to the
+# user, so a link on the stick would copy any file on the machine into it.
+m27c() {
+  mutate "$1/internal/restore/report.go" \
+    '	st, err := os.Lstat(lb.Path)' \
+    '	st, err := os.Stat(lb.Path)'
+}
+
+# ── M27d ──────────────────────────────────────────────────────────────────
+# "Nothing was left behind" stops being recognised, so every clean run says
+# files were left behind: a warning that is always there is one nobody reads.
+m27d() {
+  mutate "$1/internal/restore/report.go" \
+    '	lb.None = lb.Text == quarantine.NoneReport' \
+    '	lb.None = false'
+}
+
 # ── M14 ───────────────────────────────────────────────────────────────────
 # FATAL, and real: the finder stops looking one level down. The Windows half
 # writes <mount>/auros-backup/_auros/manifest.tsv; the first version of the
@@ -610,6 +646,19 @@ run_case M25b "the browser-profile match becomes case-sensitive" \
 run_case M26 "the Windows known-folder table drifts from the shared labels" \
   ./internal/winenv 'TestKnownFolders_ProduceExactlyTheSharedLabels' \
   'the two halves disagree' m26
+
+run_case M27 "the restore stops reading what Windows left behind (H11)" \
+  ./internal/restore 'TestExecute_TheReportNamesWhatWindowsLeftBehind' \
+  'the user is not told' m27
+run_case M27b "the clean report stops saying keep the stick" \
+  ./internal/restore 'TestReport_TheCleanBranchTellsTheUserToKeepTheStick' \
+  'does not tell the user to keep the USB stick' m27b
+run_case M27c "the left-behind list is read through a link" \
+  ./internal/restore 'TestReadLeftBehind_ALinkOnTheStickIsNotFollowed' \
+  'followed a link on the stick' m27c
+run_case M27d "an empty left-behind list reads as files left behind" \
+  ./internal/restore 'TestReport_TheCleanBranchTellsTheUserToKeepTheStick' \
+  'was reported as files left behind' m27d
 
 echo
 echo "prove-red: $PASS caught, $FAIL not caught."

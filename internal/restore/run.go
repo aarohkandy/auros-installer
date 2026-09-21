@@ -79,6 +79,9 @@ type Summary struct {
 	// PartialsSwept names every leftover temporary file from an earlier run
 	// that was killed mid-write, removed before this run wrote anything.
 	PartialsSwept []string
+	// LeftBehind is what the Windows half recorded as NOT copied: the files
+	// the manifest, by construction, does not mention (SYSTEM-REVIEW §2.22).
+	LeftBehind LeftBehind
 
 	// own is who the files this run created were handed to, so the report
 	// written afterwards is handed over the same way. nil when nothing needed
@@ -227,6 +230,7 @@ func Execute(ctx context.Context, p *Plan, o Options) (*Summary, error) {
 		ManifestCount: p.Archive.Manifest.Len(),
 		Counts:        map[Outcome]int{},
 		StartedAt:     now(),
+		LeftBehind:    ReadLeftBehind(p.Archive.Root),
 	}
 
 	// ---- CHECK 1: the archive, before anything is written ----
