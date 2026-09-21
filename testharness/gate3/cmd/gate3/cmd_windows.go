@@ -145,6 +145,10 @@ func cmdPrepare(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The profile stays loaded for the whole job, on purpose: see
+	// UserSession.KeepProfileLoaded. It is what keeps the account's registry
+	// hive out of the folders the installer is about to inventory.
+	sess.KeepProfileLoaded()
 	defer sess.Close()
 	folders, err := gate3.RedirectKnownFolders(sess, *corpus)
 	if err != nil {
@@ -224,6 +228,11 @@ func cmdRun(args []string) error {
 		if sc != nil {
 			id = sc.ID
 		}
+	}
+	if hive := gate3.HiveInCorpus(*corpus); len(hive) > 0 {
+		return fmt.Errorf("REFUSING TO RUN: the migration account's registry hive is inside the corpus "+
+			"(%s). The installer would quarantine it and stop, and this run would be filed under a "+
+			"scenario it never reached", strings.Join(hive, ", "))
 	}
 	if !*noFormat {
 		if err := gate3.FormatDestination(*destVol); err != nil {

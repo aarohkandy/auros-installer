@@ -91,11 +91,12 @@ type profileInfo struct {
 
 // UserSession is a logged-on migration user with its profile loaded.
 type UserSession struct {
-	Token    syscall.Handle
-	Profile  syscall.Handle
-	Elevated bool
-	SID      string
-	name     string
+	Token       syscall.Handle
+	Profile     syscall.Handle
+	Elevated    bool
+	SID         string
+	name        string
+	keepProfile bool
 }
 
 // LogonMigrationUser logs the migration user on and loads its profile.
@@ -155,12 +156,33 @@ func LogonMigrationUser(name, password string) (*UserSession, error) {
 	return s, nil
 }
 
+// KeepProfileLoaded stops Close from unloading the profile.
+//
+// THIS IS WHERE THE USER'S REGISTRY HIVE LIVES, AND IT MATTERS.
+//
+// The classes hive — %LOCALAPPDATA%\Microsoft\Windows\UsrClass.dat — is
+// created, and its location decided, when the profile is FIRST loaded. The
+// harness loads the profile once (hive at the account's default location), then
+// writes the known-folder redirection, and then never unloads it for the rest of
+// the job: every later logon attaches to the profile that is already loaded and
+// the hive stays where it was.
+//
+// Without that, the next logon reads the redirected Local AppData and puts the
+// hive INSIDE THE CORPUS — where the installer inventories it, cannot read it
+// (the kernel holds it open with no sharing), quarantines it, and then refuses
+// to issue a VerifiedArchive. That is not a hypothetical: it is what the first
+// run of this harness did, and it is the blocking product finding this gate
+// reports. It is reproduced deliberately by the locked-file scenario; it must
+// not also be the reason every other run fails, because then every scenario
+// would abort for the same unrelated reason and the suite would prove nothing.
+func (s *UserSession) KeepProfileLoaded() { s.keepProfile = true }
+
 // Close unloads the profile and drops the token.
 func (s *UserSession) Close() {
 	if s == nil {
 		return
 	}
-	if s.Profile != 0 {
+	if s.Profile != 0 && !s.keepProfile {
 		procUnloadUserProfile.Call(uintptr(s.Token), uintptr(s.Profile))
 	}
 	if s.Token != 0 {

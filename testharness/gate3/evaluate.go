@@ -204,9 +204,15 @@ func (r *Result) evaluateOutcome(sc *Scenario, expectedFiles int) {
 			r.Add(CheckOutcome, false,
 				"THE INSTALLER CLAIMED A VERIFIED ARCHIVE (%d files) on a run that was supposed to abort",
 				c.VerifiedCount)
+		case !r.abortedForThisReason(sc):
+			r.Add(CheckOutcome, false,
+				"the installer stopped, but not for this scenario's reason: nothing in its quarantine, "+
+					"its refusals or its output mentions %s. An abort for an unrelated reason is not "+
+					"evidence about %s%s",
+				strings.Join(sc.AbortEvidence, " or "), sc.ID, abortReason(c))
 		default:
-			r.Add(CheckOutcome, true, "stopped with exit %d and never claimed a verified archive%s",
-				r.ExitCode, abortReason(c))
+			r.Add(CheckOutcome, true, "stopped with exit %d, never claimed a verified archive, and said "+
+				"why: %s", r.ExitCode, evidenceSeen(r, sc))
 		}
 	case ExpectRefuse:
 		copied := 0
@@ -224,8 +230,14 @@ func (r *Result) evaluateOutcome(sc *Scenario, expectedFiles int) {
 			r.Add(CheckOutcome, false,
 				"the installer copied %d file(s) (%d partial) before refusing: phase 3 must refuse before "+
 					"anything is written", copied, partials)
+		case !r.abortedForThisReason(sc):
+			r.Add(CheckOutcome, false,
+				"the installer refused, but nothing it said mentions %s: a refusal for an unrelated "+
+					"reason is not evidence about %s%s",
+				strings.Join(sc.AbortEvidence, " or "), sc.ID, abortReason(c))
 		default:
-			r.Add(CheckOutcome, true, "refused with exit %d before copying a single file%s", r.ExitCode, abortReason(c))
+			r.Add(CheckOutcome, true, "refused with exit %d before copying a single file, because: %s",
+				r.ExitCode, evidenceSeen(r, sc))
 		}
 	default: // ExpectSurvive, and every clean run
 		switch {
@@ -301,6 +313,44 @@ func (r *Result) manifestDisagrees() string {
 // manifestGolden is set by the runner so Evaluate can compare the installer's
 // manifest against the corpus. It is not serialised.
 func (r *Result) attachGolden(g *Golden) { r.manifestGolden = g }
+
+// abortedForThisReason looks for the scenario's evidence in what the installer
+// said about itself. A scenario with no evidence to look for — the power cuts,
+// where the process stops existing — passes: there is nothing to find and the
+// fire record is what carries those runs.
+func (r *Result) abortedForThisReason(sc *Scenario) bool {
+	if sc == nil || len(sc.AbortEvidence) == 0 {
+		return true
+	}
+	return evidenceSeen(r, sc) != ""
+}
+
+// evidenceSeen returns the first piece of the scenario's evidence that the
+// installer actually produced.
+func evidenceSeen(r *Result, sc *Scenario) string {
+	if sc == nil || len(sc.AbortEvidence) == 0 {
+		return "(this scenario ends with the process being killed, so the installer says nothing)"
+	}
+	var hay strings.Builder
+	if r.Claims != nil {
+		hay.WriteString(r.Claims.AbortReason)
+		hay.WriteString("\n")
+		hay.WriteString(strings.Join(r.Claims.Refusals, "\n"))
+	}
+	if r.Quarantine != nil {
+		hay.WriteString("\n")
+		hay.WriteString(strings.Join(r.Quarantine.Head, "\n"))
+	}
+	hay.WriteString("\n")
+	hay.WriteString(r.LogTail)
+	text := strings.ToLower(hay.String())
+	for _, want := range sc.AbortEvidence {
+		if strings.Contains(text, strings.ToLower(want)) {
+			return want
+		}
+	}
+	return ""
+}
 
 func firstOf(lists ...[]string) string {
 	for _, l := range lists {

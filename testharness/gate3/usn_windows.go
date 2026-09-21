@@ -215,9 +215,20 @@ func DiffUSN(start USNMark, extraExclusions []string) (*SystemDiskReport, error)
 	resolver := newPathResolver(v)
 	next := start.NextUSN
 	out := make([]byte, 1<<20)
-	byDir := map[string]int{}
-	unexplained := map[string]uint32{}
 
+	// Two passes. The first reads every record and remembers, for every file
+	// reference the journal mentions, its name and its parent; the second turns
+	// those into paths. A directory that was created and deleted inside the
+	// window cannot be opened afterwards, so without the first pass those
+	// changes resolve to nothing, land outside every noise rule, and every run
+	// reports them — which is how a noise list grows until it covers the thing
+	// it was supposed to catch.
+	type rec struct {
+		parent uint64
+		name   string
+		reason uint32
+	}
+	var records []rec
 	for next < end.NextUSN {
 		var in [40]byte
 		binary.LittleEndian.PutUint64(in[0:8], uint64(next))
@@ -243,41 +254,52 @@ func DiffUSN(start USNMark, extraExclusions []string) (*SystemDiskReport, error)
 			if recLen < 60 || off+recLen > ret {
 				break
 			}
-			rec := out[off : off+recLen]
-			parentRef := binary.LittleEndian.Uint64(rec[16:24])
-			usn := int64(binary.LittleEndian.Uint64(rec[24:32]))
-			reason := binary.LittleEndian.Uint32(rec[40:44])
-			nameLen := binary.LittleEndian.Uint16(rec[56:58])
-			nameOff := binary.LittleEndian.Uint16(rec[58:60])
+			r := out[off : off+recLen]
+			fileRef := binary.LittleEndian.Uint64(r[8:16])
+			parentRef := binary.LittleEndian.Uint64(r[16:24])
+			usn := int64(binary.LittleEndian.Uint64(r[24:32]))
+			reason := binary.LittleEndian.Uint32(r[40:44])
+			attrs := binary.LittleEndian.Uint32(r[52:56])
+			nameLen := binary.LittleEndian.Uint16(r[56:58])
+			nameOff := binary.LittleEndian.Uint16(r[58:60])
 			name := ""
 			if uint32(nameOff)+uint32(nameLen) <= recLen {
 				u16 := make([]uint16, nameLen/2)
 				for i := range u16 {
-					u16[i] = binary.LittleEndian.Uint16(rec[int(nameOff)+i*2:])
+					u16[i] = binary.LittleEndian.Uint16(r[int(nameOff)+i*2:])
 				}
 				name = string(utf16Decode(u16))
 			}
 			off += recLen
+			if attrs&syscall.FILE_ATTRIBUTE_DIRECTORY != 0 {
+				resolver.learn(fileRef, parentRef, name)
+			}
 			if usn >= end.NextUSN {
 				continue
 			}
-			rep.Records++
-			full := resolver.resolve(parentRef, name)
-			byDir[dirOf(full)]++
-			if ok, _ := IsNoise(full); ok {
-				rep.Excluded++
-				continue
-			}
-			if matchesAny(full, excl) {
-				rep.Excluded++
-				continue
-			}
-			unexplained[full] |= reason
+			records = append(records, rec{parent: parentRef, name: name, reason: reason})
 		}
 		if newNext <= next {
 			break
 		}
 		next = newNext
+	}
+
+	byDir := map[string]int{}
+	unexplained := map[string]uint32{}
+	for _, r := range records {
+		rep.Records++
+		full := resolver.resolve(r.parent, r.name)
+		byDir[dirOf(full)]++
+		if ok, _ := IsNoise(full); ok {
+			rep.Excluded++
+			continue
+		}
+		if matchesAny(full, excl) {
+			rep.Excluded++
+			continue
+		}
+		unexplained[full] |= r.reason
 	}
 
 	for p, reason := range unexplained {
@@ -343,22 +365,64 @@ func topDirs(m map[string]int, n int) []string {
 type pathResolver struct {
 	v     *usnVolume
 	cache map[uint64]string
+	known map[uint64]struct {
+		parent uint64
+		name   string
+	}
 }
 
 func newPathResolver(v *usnVolume) *pathResolver {
-	return &pathResolver{v: v, cache: map[uint64]string{}}
+	// Opening a directory by its file id to read its name is a backup-style
+	// read. Without the privilege the open fails on directories the harness
+	// account cannot traverse, and the change resolves to nothing.
+	_ = enablePrivilege("SeBackupPrivilege")
+	return &pathResolver{v: v, cache: map[uint64]string{}, known: map[uint64]struct {
+		parent uint64
+		name   string
+	}{}}
+}
+
+// learn records a directory the journal itself described, so a directory that
+// no longer exists can still be named.
+func (r *pathResolver) learn(ref, parent uint64, name string) {
+	if name == "" || ref == 0 {
+		return
+	}
+	if _, ok := r.known[ref]; !ok {
+		r.known[ref] = struct {
+			parent uint64
+			name   string
+		}{parent: parent, name: name}
+	}
 }
 
 func (r *pathResolver) resolve(parentRef uint64, name string) string {
-	dir, ok := r.cache[parentRef]
-	if !ok {
-		dir = r.lookup(parentRef)
-		r.cache[parentRef] = dir
-	}
+	dir := r.dirOf(parentRef, 0)
 	if dir == "" {
 		return fmt.Sprintf("<unresolved parent %d>\\%s", parentRef, name)
 	}
 	return strings.TrimRight(dir, `\`) + `\` + name
+}
+
+// dirOf names a directory by its file reference, from the file system if it is
+// still there and from the journal's own records if it is not.
+func (r *pathResolver) dirOf(ref uint64, depth int) string {
+	if ref == 0 || depth > 64 {
+		return ""
+	}
+	if p, ok := r.cache[ref]; ok {
+		return p
+	}
+	p := r.lookup(ref)
+	if p == "" {
+		if k, ok := r.known[ref]; ok {
+			if parent := r.dirOf(k.parent, depth+1); parent != "" {
+				p = strings.TrimRight(parent, `\`) + `\` + k.name
+			}
+		}
+	}
+	r.cache[ref] = p
+	return p
 }
 
 func (r *pathResolver) lookup(ref uint64) string {

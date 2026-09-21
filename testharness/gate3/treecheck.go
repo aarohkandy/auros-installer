@@ -254,6 +254,20 @@ func CheckSource(g *Golden, root string, devs []Deviation) (*TreeReport, error) 
 // is right.
 func CheckArchive(g *Golden, root string, devs []Deviation, complete bool) (*TreeReport, error) {
 	rep := &TreeReport{Tree: "archive", Root: root, Expected: len(g.ByCopy)}
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		// No archive directory at all. That is the CORRECT state after a phase-3
+		// refusal — the installer must refuse before it creates anything — so it
+		// is an empty measurement rather than an unreadable one. Whether it is
+		// allowed to be empty is the outcome check's business, not this one's.
+		if complete {
+			for rel := range g.ByArchive() {
+				rep.Missing = append(rep.Missing, rel)
+			}
+			sort.Strings(rep.Missing)
+			rep.trim()
+		}
+		return rep, nil
+	}
 	byArchive := g.ByArchive()
 	buf := make([]byte, 1<<20)
 	seen := make(map[string]bool, len(byArchive))

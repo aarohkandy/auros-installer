@@ -142,6 +142,9 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Never unload: the profile must stay loaded for the whole job so the
+	// account's registry hive stays out of the corpus. See KeepProfileLoaded.
+	sess.KeepProfileLoaded()
 	defer sess.Close()
 	res.Elevated = sess.Elevated
 
@@ -645,7 +648,12 @@ func FormatDestination(volume string) error {
 	if strings.EqualFold(letter, "C:") || strings.EqualFold(letter, strings.TrimSuffix(os.Getenv("SystemDrive"), `\`)) {
 		return fmt.Errorf("gate3: refusing to format %s: that is the system volume", letter)
 	}
-	out, err := exec.Command("cmd", "/c", "format", letter, "/FS:NTFS", "/Q", "/Y", "/V:AUROSDEST").CombinedOutput()
+	// Format-Volume rather than `format`: on a fixed disk, format.com asks the
+	// operator to type the current volume label back as a confirmation, and a
+	// process with no console input waits for that forever.
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf("Format-Volume -DriveLetter %s -FileSystem NTFS -NewFileSystemLabel AUROSDEST "+
+			"-Force -Confirm:$false | Out-Null; exit $LASTEXITCODE", strings.TrimSuffix(letter, ":"))).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gate3: formatting %s: %v: %s", letter, err, strings.TrimSpace(string(out)))
 	}

@@ -179,6 +179,29 @@ func hostname() string {
 	return h
 }
 
+// HiveInCorpus reports whether the account's own registry hive has landed inside
+// the corpus, which would put a file the kernel holds open into the set of files
+// the installer inventories.
+//
+// It is checked before every run and it is fatal, because a run in that state
+// aborts for a reason that has nothing to do with the scenario it is filed
+// under — and twenty scenarios that all abort for the same unrelated reason is a
+// green suite that proves nothing.
+func HiveInCorpus(corpusRoot string) []string {
+	var found []string
+	dir := filepath.Join(corpusRoot, "AppData", "Local", "Microsoft", "Windows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(strings.ToLower(e.Name()), "usrclass.dat") {
+			found = append(found, filepath.Join(dir, e.Name()))
+		}
+	}
+	return found
+}
+
 // RedirectKnownFolders points the migration user's known folders at the corpus,
 // by writing the redirection into that user's own hive.
 //

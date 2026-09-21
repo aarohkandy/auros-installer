@@ -65,6 +65,12 @@ var noiseRules = []NoiseRule{
 	{Pattern: `^c:\\windows\\system32\\catroot2\\`, Why: "the catalogue database, rewritten by signature checks"},
 	{Pattern: `^c:\\windows\\(temp|logs|debug|tracing|inf|appcompat|serviceprofiles|softwaredistribution|prefetch|servicing|winsxs|panther|bootstat\.dat)`, Why: "directories Windows uses as scratch, log or servicing space"},
 	{Pattern: `^c:\\windows\\security\\`, Why: "local security policy databases, rewritten on logon"},
+	{Pattern: `^c:\\windows\\servicestate\\`, Why: "service heartbeat files, e.g. the event log's lastalive"},
+	{Pattern: `^c:\\windows\\system32\\microsoft\\protect\\`, Why: "DPAPI's own machine key store and its diagnostic log"},
+	{Pattern: `^c:\\windows\\system32\\(perfstringbackup\.(ini|tmp)|perftmp\.dat|perf[a-z][0-9]+\.dat)$`,
+		Why: "the performance-counter registry, rebuilt whenever anything queries WMI. `manage-bde -status` " +
+			"— the installer's own BitLocker READ — is one of the things that triggers it"},
+	{Pattern: `^c:\\windows\\system32\\wbem\\performance\\`, Why: "the WMI performance-counter cache, rebuilt by any WMI query"},
 	{Pattern: `^c:\\programdata\\microsoft\\(windows defender|windows\\wer|network|crypto|diagnosis|windows\\appreplocations|windows\\caches|clipsvc)\\`, Why: "Defender, error reporting, and the licensing and crypto stores"},
 	{Pattern: `^c:\\programdata\\microsoft\\windows\\start menu\\`, Why: "start-menu bookkeeping"},
 	{Pattern: `^c:\\programdata\\usoshared\\`, Why: "the update orchestrator"},
@@ -84,6 +90,10 @@ var noiseRules = []NoiseRule{
 	// that profile, and all of the corpus, stay inside the check.
 	{Pattern: `^c:\\users\\auros-gate3\\(ntuser\.dat|ntuser\.ini|ntuser\.dat\.log[0-9]*|ntuser\.dat\{[0-9a-f-]+\}\.tm\.blf|ntuser\.dat\{[0-9a-f-]+\}\.tmcontainer[0-9]+\.regtrans-ms)$`, Why: "the migration account's registry hive, written by the profile service at logon and logoff"},
 	{Pattern: `^c:\\users\\auros-gate3\\appdata\\local\\microsoft\\windows\\usrclass\.dat`, Why: "the migration account's classes hive, loaded and flushed with the profile"},
+	{Pattern: `^c:\\users\\auros-gate3\\appdata\\(roaming|local)\\microsoft\\`,
+		Why: "Windows' own per-user state for the migration account — DPAPI master keys, CloudStore, " +
+			"shell bookkeeping — created by the LOGON, in the account's default profile. Its known " +
+			"folders are redirected into the corpus, so nothing the installer copies passes through here"},
 	// This account's known folders are REDIRECTED to the corpus, so nothing the
 	// installer reads or writes for the migration passes through here.
 	{Pattern: `^c:\\users\\auros-gate3\\appdata\\local\\(temp|microsoft\\windows\\(inetcache|history|ie|explorer|caches))\\`, Why: "the migration account's own temp and shell caches"},

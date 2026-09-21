@@ -429,6 +429,43 @@ func TestVerdictFailsWhenTheHarnessHadToKillAHungInstaller(t *testing.T) {
 	}
 }
 
+func TestVerdictFailsWhenTheInstallerAbortedForAnUnrelatedReason(t *testing.T) {
+	// The failure this exists for is not hypothetical. The first version of this
+	// harness left the migration account's registry hive inside the corpus; the
+	// installer quarantined it and stopped on EVERY run, so every scenario
+	// "aborted cleanly" without any of them reaching its own fault.
+	sc, _ := Lookup("F07") // the destination fills; the installer must say "destination-full"
+	r := newResultForTest(KindFault)
+	r.ExitCode = 1
+	r.Claims.ClaimedVerified = false
+	r.Claims.AbortReason = "verify: safety: unresolved quarantined files remain"
+	r.Quarantine = &QuarantineReport{Exists: true,
+		Head: []string{"locked-or-in-use   LocalAppData/Microsoft/Windows/UsrClass.dat"}}
+	r.Fire = &FireRecord{ScenarioID: "F07", Fired: true, ObservedBytes: 1 << 20, DestBytesAtFire: 1 << 20}
+	r.Pin = &Pin{CumulativeBytes: 1 << 20}
+	r.Evaluate(&sc, 9)
+	if v, _ := r.Recompute(RequiredChecks(KindFault, &sc)); v == Pass {
+		t.Fatal("a run that aborted for a reason unrelated to its scenario was scored as an induced-failure pass")
+	}
+}
+
+func TestVerdictAcceptsAnAbortThatNamesItsOwnReason(t *testing.T) {
+	// The other direction, so the check above is not passing because the
+	// evidence can never be found.
+	sc, _ := Lookup("F07")
+	r := newResultForTest(KindFault)
+	r.ExitCode = 1
+	r.Claims.ClaimedVerified = false
+	r.Claims.AbortReason = "copy: copyengine: destination volume is full after 9042 of 18000 files"
+	r.Quarantine = &QuarantineReport{Exists: true, Head: []string{"destination-full   Documents/x.docx"}}
+	r.Fire = &FireRecord{ScenarioID: "F07", Fired: true, ObservedBytes: 1 << 20, DestBytesAtFire: 1 << 20}
+	r.Pin = &Pin{CumulativeBytes: 1 << 20}
+	r.Evaluate(&sc, 9)
+	if v, why := r.Recompute(RequiredChecks(KindFault, &sc)); v != Pass {
+		t.Fatalf("an abort that named its own reason was scored as a failure: %v", why)
+	}
+}
+
 func TestRecomputeFailsWhenACheckIsSimplyMissing(t *testing.T) {
 	r := &Result{Checks: []Check{{ID: CheckSystemDisk, Status: Pass}}}
 	if v, why := r.Recompute(RequiredChecks(KindClean, nil)); v == Pass {
