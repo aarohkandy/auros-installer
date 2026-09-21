@@ -47,7 +47,7 @@ defaults:
 jobs:
   check:
     name: vet, format, test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -107,7 +107,7 @@ jobs:
 
   testharness:
     name: testharness (nested module)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -176,7 +176,7 @@ jobs:
 
   vuln:
     name: govulncheck
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -212,7 +212,7 @@ jobs:
 
   build-windows:
     name: build windows/${{ matrix.goarch }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: check
     strategy:
       fail-fast: false
