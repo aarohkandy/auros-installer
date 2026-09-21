@@ -40,16 +40,16 @@ type Check struct {
 // except C4, which compares the installer's own claims against the outcome the
 // scenario requires.
 const (
-	CheckSystemDisk    = "C1-system-disk-untouched"
-	CheckSourceIntact  = "C2-source-intact"
-	CheckArchiveSound  = "C3-archive-not-corrupted"
-	CheckOutcome       = "C4-outcome-as-required"
-	CheckFaultFired    = "C5-fault-fired-at-its-pin"
+	CheckSystemDisk     = "C1-system-disk-untouched"
+	CheckSourceIntact   = "C2-source-intact"
+	CheckArchiveSound   = "C3-archive-not-corrupted"
+	CheckOutcome        = "C4-outcome-as-required"
+	CheckFaultFired     = "C5-fault-fired-at-its-pin"
 	CheckWallNotCrossed = "C6-wall-not-crossed"
-	CheckArchiveFull   = "C7-archive-complete"
-	CheckManifestSound = "C8-manifest-on-destination-agrees"
-	CheckKnownFolders  = "C9-known-folders-resolved-to-the-corpus"
-	CheckEndedItself   = "C10-installer-ended-on-its-own"
+	CheckArchiveFull    = "C7-archive-complete"
+	CheckManifestSound  = "C8-manifest-on-destination-agrees"
+	CheckKnownFolders   = "C9-known-folders-resolved-to-the-corpus"
+	CheckEndedItself    = "C10-installer-ended-on-its-own"
 )
 
 // Kind distinguishes the two halves of §6C.
@@ -93,8 +93,8 @@ type Result struct {
 	TimedOut    bool    `json:"timed_out"`
 	DurationSec float64 `json:"duration_sec"`
 
-	Pin       *Pin        `json:"pin,omitempty"`
-	Fire      *FireRecord `json:"fire,omitempty"`
+	Pin        *Pin        `json:"pin,omitempty"`
+	Fire       *FireRecord `json:"fire,omitempty"`
 	Deviations []Deviation `json:"deviations,omitempty"`
 
 	SystemDisk *SystemDiskReport `json:"system_disk,omitempty"`
@@ -151,17 +151,17 @@ type SystemDiskReport struct {
 	Method string `json:"method"`
 	// JournalID and the USN range make the window auditable: everything that
 	// happened to C: between these two numbers was examined.
-	JournalID  uint64 `json:"usn_journal_id"`
-	StartUSN   int64  `json:"usn_start"`
-	EndUSN     int64  `json:"usn_end"`
-	Records    int    `json:"records_examined"`
-	Excluded   int    `json:"records_excluded_as_noise"`
+	JournalID   uint64   `json:"usn_journal_id"`
+	StartUSN    int64    `json:"usn_start"`
+	EndUSN      int64    `json:"usn_end"`
+	Records     int      `json:"records_examined"`
+	Excluded    int      `json:"records_excluded_as_noise"`
 	Unexplained []string `json:"unexplained_changes,omitempty"`
 	// Wrapped is the fail-closed case: the journal overwrote records before we
 	// read them, so the window cannot be accounted for and the run cannot claim
 	// the invariant held.
-	Wrapped     bool     `json:"journal_wrapped"`
-	Error       string   `json:"error,omitempty"`
+	Wrapped      bool     `json:"journal_wrapped"`
+	Error        string   `json:"error,omitempty"`
 	Exclusions   []string `json:"exclusion_rules"`
 	ExclusionSHA string   `json:"exclusion_rules_sha256"`
 

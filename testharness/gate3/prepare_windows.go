@@ -72,13 +72,13 @@ const (
 )
 
 var (
-	modnetapi32                  = syscall.NewLazyDLL("netapi32.dll")
-	procNetUserAdd               = modnetapi32.NewProc("NetUserAdd")
-	procNetUserDel               = modnetapi32.NewProc("NetUserDel")
-	procNetLocalGroupAddMembers  = modnetapi32.NewProc("NetLocalGroupAddMembers")
-	procRegCreateKeyExW          = modadvapi32.NewProc("RegCreateKeyExW")
-	procRegSetValueExW           = modadvapi32.NewProc("RegSetValueExW")
-	procRegCloseKeyP             = modadvapi32.NewProc("RegCloseKey")
+	modnetapi32                 = syscall.NewLazyDLL("netapi32.dll")
+	procNetUserAdd              = modnetapi32.NewProc("NetUserAdd")
+	procNetUserDel              = modnetapi32.NewProc("NetUserDel")
+	procNetLocalGroupAddMembers = modnetapi32.NewProc("NetLocalGroupAddMembers")
+	procRegCreateKeyExW         = modadvapi32.NewProc("RegCreateKeyExW")
+	procRegSetValueExW          = modadvapi32.NewProc("RegSetValueExW")
+	procRegCloseKeyP            = modadvapi32.NewProc("RegCloseKey")
 )
 
 type userInfo1 struct {

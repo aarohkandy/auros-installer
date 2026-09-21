@@ -178,15 +178,15 @@ type ManifestEntry struct {
 
 // ManifestFile is the parsed result plus the integrity of the file itself.
 type ManifestFile struct {
-	Path        string `json:"path"`
-	Exists      bool   `json:"exists"`
-	Parses      bool   `json:"parses"`
-	ParseError  string `json:"parse_error,omitempty"`
-	Count       int    `json:"count"`
-	TotalBytes  int64  `json:"total_bytes"`
-	BodyDigest  string `json:"body_digest,omitempty"`
-	TrailerOK   bool   `json:"trailer_ok"`
-	FileSHA256  string `json:"file_sha256,omitempty"`
+	Path         string `json:"path"`
+	Exists       bool   `json:"exists"`
+	Parses       bool   `json:"parses"`
+	ParseError   string `json:"parse_error,omitempty"`
+	Count        int    `json:"count"`
+	TotalBytes   int64  `json:"total_bytes"`
+	BodyDigest   string `json:"body_digest,omitempty"`
+	TrailerOK    bool   `json:"trailer_ok"`
+	FileSHA256   string `json:"file_sha256,omitempty"`
 	entriesByRel map[string]ManifestEntry
 }
 

@@ -161,7 +161,7 @@ func TestArchivePathMappingRefusesFilesOutsideTheKnownFolders(t *testing.T) {
 	}
 }
 
-func TestCopyOrderIsByteOrderOfTheArchivePath(t *testing.T) {
+func TestCopyOrderIsByteOrderOfTheArchivePathOrEveryPinIsWrong(t *testing.T) {
 	f := newFixture(t)
 	for i := 1; i < len(f.g.ByCopy); i++ {
 		if !(f.g.ByCopy[i-1].Archive < f.g.ByCopy[i].Archive) {
@@ -190,7 +190,7 @@ func TestLoadGoldenRefusesANameThatWouldHaveToBeEscaped(t *testing.T) {
 	}
 }
 
-func TestResolvePinLandsInsideTheRightFile(t *testing.T) {
+func TestResolvePinLandsInsideTheRightFileOrTheScenarioIsNominal(t *testing.T) {
 	f := newFixture(t)
 	pin, err := ResolvePin(f.g, PhaseCopy, 5000)
 	if err != nil {
@@ -256,7 +256,7 @@ func TestSourceCheckCatchesAMissingFile(t *testing.T) {
 	}
 }
 
-func TestSourceCheckCatchesADeviationThatDidNotHappen(t *testing.T) {
+func TestSourceCheckFailsWhenADeviationNeverHappened(t *testing.T) {
 	f := newFixture(t)
 	// The harness says it deleted a file. It did not. That must fail: an
 	// expectation written in advance must never absorb a fault that did not land.
@@ -267,7 +267,7 @@ func TestSourceCheckCatchesADeviationThatDidNotHappen(t *testing.T) {
 	}
 }
 
-func TestArchiveCheckCatchesOneFlippedBit(t *testing.T) {
+func TestArchiveCheckCatchesOneFlippedBitAsCorruption(t *testing.T) {
 	f := newFixture(t)
 	victim := filepath.Join(f.dest, "Desktop", "timetable.txt")
 	b, err := os.ReadFile(victim)
@@ -284,7 +284,7 @@ func TestArchiveCheckCatchesOneFlippedBit(t *testing.T) {
 	}
 }
 
-func TestArchiveCheckCatchesAnExtraFileTheManifestDoesNotKnow(t *testing.T) {
+func TestArchiveCheckCatchesAnExtraFileTheManifestNeverHeardOf(t *testing.T) {
 	f := newFixture(t)
 	if err := os.WriteFile(filepath.Join(f.dest, "Desktop", "stranger.bin"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
@@ -310,7 +310,7 @@ func TestArchiveCheckCatchesAMissingFileOnARunThatClaimsToBeComplete(t *testing.
 	}
 }
 
-func TestArchiveCheckAcceptsOnlyVersionsThatReallyExisted(t *testing.T) {
+func TestArchiveCheckRefusesATornFileThatNeverExisted(t *testing.T) {
 	f := newFixture(t)
 	// A file that was rewritten while it was being copied may legitimately be
 	// either version. A MIXTURE of the two never existed and is corruption.
@@ -500,7 +500,7 @@ func sha256Hex(s string) string {
 
 // ── the noise list is not a blanket ──────────────────────────────────────────
 
-func TestNoiseListDoesNotExcuseAnywhereTheInstallerMightWrite(t *testing.T) {
+func TestNoiseListNeverExcusesAnywhereTheInstallerMightWrite(t *testing.T) {
 	mustNotBeNoise := []string{
 		`C:\gate3\corpus\Documents\Year 7\notes.txt`,
 		`C:\gate3\corpus\AppData\Local\Google\Chrome\User Data\Default\Bookmarks`,

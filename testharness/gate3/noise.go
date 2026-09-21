@@ -51,47 +51,42 @@ type NoiseRule struct {
 
 // noiseRules are matched against the lowercased full path of a changed file.
 var noiseRules = []NoiseRule{
-	{`^[a-z]:\\\$extend\\`, "NTFS's own metadata files, including the change journal this check reads"},
-	{`^[a-z]:\\\$mft`, "the master file table"},
-	{`^[a-z]:\\(pagefile|swapfile|hiberfil)\.sys$`, "the kernel's own files; their size changes with load"},
-	{`^[a-z]:\\\$recycle\.bin\\`, "the recycle bin"},
-	{`^[a-z]:\\system volume information\\`, "volume shadow / indexing metadata owned by the OS"},
+	{Pattern: `^[a-z]:\\\$extend\\`, Why: "NTFS's own metadata files, including the change journal this check reads"},
+	{Pattern: `^[a-z]:\\\$mft`, Why: "the master file table"},
+	{Pattern: `^[a-z]:\\(pagefile|swapfile|hiberfil)\.sys$`, Why: "the kernel's own files; their size changes with load"},
+	{Pattern: `^[a-z]:\\\$recycle\.bin\\`, Why: "the recycle bin"},
+	{Pattern: `^[a-z]:\\system volume information\\`, Why: "volume shadow / indexing metadata owned by the OS"},
 
-	{`^c:\\windows\\system32\\config\\`, "the registry hives and their transaction logs"},
-	{`^c:\\windows\\system32\\winevt\\logs\\`, "the Windows event logs"},
-	{`^c:\\windows\\system32\\logfiles\\`, "Windows service log files"},
-	{`^c:\\windows\\system32\\(sru|wdi)\\`, "system resource usage and diagnostics databases"},
-	{`^c:\\windows\\system32\\spool\\`, "the print spooler's working directory"},
-	{`^c:\\windows\\system32\\catroot2\\`, "the catalogue database, rewritten by signature checks"},
-	{`^c:\\windows\\(temp|logs|debug|tracing|inf|appcompat|serviceprofiles|softwaredistribution|prefetch|servicing|winsxs|panther|bootstat\.dat)`,
-		"directories Windows uses as scratch, log or servicing space"},
-	{`^c:\\windows\\security\\`, "local security policy databases, rewritten on logon"},
-	{`^c:\\programdata\\microsoft\\(windows defender|windows\\wer|network|crypto|diagnosis|windows\\appreplocations|windows\\caches|clipsvc)\\`,
-		"Defender, error reporting, and the licensing and crypto stores"},
-	{`^c:\\programdata\\microsoft\\windows\\start menu\\`, "start-menu bookkeeping"},
-	{`^c:\\programdata\\usoshared\\`, "the update orchestrator"},
+	{Pattern: `^c:\\windows\\system32\\config\\`, Why: "the registry hives and their transaction logs"},
+	{Pattern: `^c:\\windows\\system32\\winevt\\logs\\`, Why: "the Windows event logs"},
+	{Pattern: `^c:\\windows\\system32\\logfiles\\`, Why: "Windows service log files"},
+	{Pattern: `^c:\\windows\\system32\\(sru|wdi)\\`, Why: "system resource usage and diagnostics databases"},
+	{Pattern: `^c:\\windows\\system32\\spool\\`, Why: "the print spooler's working directory"},
+	{Pattern: `^c:\\windows\\system32\\catroot2\\`, Why: "the catalogue database, rewritten by signature checks"},
+	{Pattern: `^c:\\windows\\(temp|logs|debug|tracing|inf|appcompat|serviceprofiles|softwaredistribution|prefetch|servicing|winsxs|panther|bootstat\.dat)`, Why: "directories Windows uses as scratch, log or servicing space"},
+	{Pattern: `^c:\\windows\\security\\`, Why: "local security policy databases, rewritten on logon"},
+	{Pattern: `^c:\\programdata\\microsoft\\(windows defender|windows\\wer|network|crypto|diagnosis|windows\\appreplocations|windows\\caches|clipsvc)\\`, Why: "Defender, error reporting, and the licensing and crypto stores"},
+	{Pattern: `^c:\\programdata\\microsoft\\windows\\start menu\\`, Why: "start-menu bookkeeping"},
+	{Pattern: `^c:\\programdata\\usoshared\\`, Why: "the update orchestrator"},
 
-	{`^c:\\actions-runner\\`, "the CI runner's own installation and diagnostic logs"},
-	{`^c:\\actionarchivecache\\`, "the CI runner's action cache"},
+	{Pattern: `^c:\\actions-runner\\`, Why: "the CI runner's own installation and diagnostic logs"},
+	{Pattern: `^c:\\actionarchivecache\\`, Why: "the CI runner's action cache"},
 
-	{`^c:\\users\\runneradmin\\appdata\\local\\temp\\`, "the CI account's temp directory"},
-	{`^c:\\users\\runneradmin\\appdata\\local\\microsoft\\`, "the CI account's own Windows bookkeeping"},
-	{`^c:\\users\\runneradmin\\appdata\\roaming\\microsoft\\`, "the CI account's own Windows bookkeeping"},
-	{`^c:\\users\\runneradmin\\\.dotnet\\`, "the .NET CLI's first-run sentinel, written by the runner's own tooling"},
-	{`^c:\\users\\runneradmin\\ntuser\.`, "the CI account's registry hive and its logs"},
+	{Pattern: `^c:\\users\\runneradmin\\appdata\\local\\temp\\`, Why: "the CI account's temp directory"},
+	{Pattern: `^c:\\users\\runneradmin\\appdata\\local\\microsoft\\`, Why: "the CI account's own Windows bookkeeping"},
+	{Pattern: `^c:\\users\\runneradmin\\appdata\\roaming\\microsoft\\`, Why: "the CI account's own Windows bookkeeping"},
+	{Pattern: `^c:\\users\\runneradmin\\\.dotnet\\`, Why: "the .NET CLI's first-run sentinel, written by the runner's own tooling"},
+	{Pattern: `^c:\\users\\runneradmin\\ntuser\.`, Why: "the CI account's registry hive and its logs"},
 
 	// The migration account's hive. Loading a user's profile is what makes
 	// SHGetKnownFolderPath answer for that user at all, and the profile service
 	// writes these files at every load and unload. Named exactly — the rest of
 	// that profile, and all of the corpus, stay inside the check.
-	{`^c:\\users\\auros-gate3\\(ntuser\.dat|ntuser\.ini|ntuser\.dat\.log[0-9]*|ntuser\.dat\{[0-9a-f-]+\}\.tm\.blf|ntuser\.dat\{[0-9a-f-]+\}\.tmcontainer[0-9]+\.regtrans-ms)$`,
-		"the migration account's registry hive, written by the profile service at logon and logoff"},
-	{`^c:\\users\\auros-gate3\\appdata\\local\\microsoft\\windows\\usrclass\.dat`,
-		"the migration account's classes hive, loaded and flushed with the profile"},
-	{`^c:\\users\\auros-gate3\\appdata\\local\\(temp|microsoft\\windows\\(inetcache|history|ie|explorer|caches))\\`,
-		"the migration account's own temp and shell caches. NOTE: this account's known folders are " +
-			"REDIRECTED to the corpus, so nothing the installer reads or writes for the migration " +
-			"passes through here"},
+	{Pattern: `^c:\\users\\auros-gate3\\(ntuser\.dat|ntuser\.ini|ntuser\.dat\.log[0-9]*|ntuser\.dat\{[0-9a-f-]+\}\.tm\.blf|ntuser\.dat\{[0-9a-f-]+\}\.tmcontainer[0-9]+\.regtrans-ms)$`, Why: "the migration account's registry hive, written by the profile service at logon and logoff"},
+	{Pattern: `^c:\\users\\auros-gate3\\appdata\\local\\microsoft\\windows\\usrclass\.dat`, Why: "the migration account's classes hive, loaded and flushed with the profile"},
+	// This account's known folders are REDIRECTED to the corpus, so nothing the
+	// installer reads or writes for the migration passes through here.
+	{Pattern: `^c:\\users\\auros-gate3\\appdata\\local\\(temp|microsoft\\windows\\(inetcache|history|ie|explorer|caches))\\`, Why: "the migration account's own temp and shell caches"},
 }
 
 var compiledNoise = func() []NoiseRule {

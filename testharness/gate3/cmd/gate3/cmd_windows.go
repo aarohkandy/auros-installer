@@ -73,9 +73,9 @@ func cmdMintToken(args []string) error {
 			"blurs those two cannot show that the installer keeps them apart (%s)", corpusSerial)
 	}
 	tok := fault.Token{
-		Harness: gate3.HarnessVersion,
-		SuiteID: os.Getenv("GITHUB_RUN_ID") + "-" + os.Getenv("GITHUB_RUN_ATTEMPT"),
-		RunID:   os.Getenv("GITHUB_JOB"),
+		Harness:                gate3.HarnessVersion,
+		SuiteID:                os.Getenv("GITHUB_RUN_ID") + "-" + os.Getenv("GITHUB_RUN_ATTEMPT"),
+		RunID:                  os.Getenv("GITHUB_JOB"),
 		TargetVolSerial:        corpusSerial,
 		DestVolSerial:          destSerial,
 		DestroysEverythingHere: true,

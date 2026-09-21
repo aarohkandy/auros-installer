@@ -188,7 +188,7 @@ type Scenario struct {
 // testing the easy half.
 func Suite() []Scenario {
 	const (
-		aheadFar   = 3 << 30  // far enough ahead that the installer has not planned past it yet
+		aheadFar   = 3 << 30   // far enough ahead that the installer has not planned past it yet
 		ahead      = 256 << 20 // ~2 seconds of copying ahead on a hosted runner
 		behind     = -64 << 20 // comfortably already copied
 		holdTarget = 50

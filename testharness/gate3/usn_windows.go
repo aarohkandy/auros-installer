@@ -57,12 +57,12 @@ var (
 
 // USNMark is the journal position at one instant.
 type USNMark struct {
-	JournalID  uint64
-	NextUSN    int64
-	FirstUSN   int64
-	LowestUSN  int64
-	MaxSize    uint64
-	Volume     string
+	JournalID uint64
+	NextUSN   int64
+	FirstUSN  int64
+	LowestUSN int64
+	MaxSize   uint64
+	Volume    string
 }
 
 type usnVolume struct {
