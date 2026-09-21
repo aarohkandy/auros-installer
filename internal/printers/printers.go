@@ -332,3 +332,29 @@ func tabSafe(s string) string {
 	r := strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
 	return r.Replace(s)
 }
+
+// Render writes the inventory Parse reads. It is the Windows half's writer and
+// lives here, next to Parse, so the two ends of the format are one file: the
+// join test in cmd/auros-migrate feeds its output to the real Parse.
+//
+// Framing characters in a field are replaced, never passed through: a printer
+// named with a tab would otherwise shift its port into the driver column. A row
+// with no name is dropped, because Parse rightly refuses one and one bad row
+// must not cost the user every other printer.
+func Render(ps []Printer) []byte {
+	var b strings.Builder
+	b.WriteString(Header + "\n" + columns + "\n")
+	for _, p := range ps {
+		name := strings.TrimSpace(tabSafe(p.Name))
+		if name == "" {
+			continue
+		}
+		def := "0"
+		if p.Default {
+			def = "1"
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\t%s\t%s\n", name, tabSafe(p.Port), tabSafe(p.Driver),
+			def, tabSafe(p.Location), tabSafe(p.Comment))
+	}
+	return []byte(b.String())
+}

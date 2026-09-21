@@ -215,15 +215,21 @@ func captureStdout(t *testing.T, f func()) string {
 // ---------- phase 2: the §4.2 disclosure must be true ----------
 
 func TestDisclosure_DoesNotClaimWiFiPrintersOrAccountNameComeAcross(t *testing.T) {
-	// SYSTEM-REVIEW §2.8: no Wi-Fi, printer or account-name export code exists
-	// anywhere in this repository, and the one screen prohibition §4.2 exists to
-	// make honest said all three come across. It must say they do not.
-	out := strings.Join(strings.Fields(captureStdout(t, func() { printDisclosure(nil) })), " ")
+	// SYSTEM-REVIEW §2.8: the screen prohibition §4.2 exists to make honest once
+	// said Wi-Fi, printers and account name all come across. Wi-Fi and printers
+	// are now disclosed per item (extras_test.go); with nothing read, none may be
+	// claimed, and the account name never comes across.
+	var b strings.Builder
+	printDisclosure(&b, nil, extras{})
+	out := strings.Join(strings.Fields(b.String()), " ")
 	if strings.Contains(out, "Wi-Fi networks, printers and account name do come across") {
 		t.Fatal("the disclosure still claims Wi-Fi, printers and account name come across")
 	}
-	if !strings.Contains(out, "Wi-Fi networks, printers and your account name do NOT come across") {
-		t.Errorf("the disclosure does not say Wi-Fi, printers and account name stay behind:\n%s", out)
+	if strings.Contains(out, "comes across") {
+		t.Errorf("with no networks or printers read, the disclosure claims one comes across:\n%s", out)
+	}
+	if !strings.Contains(out, "Your account name does NOT come across") {
+		t.Errorf("the disclosure does not say the account name stays behind:\n%s", out)
 	}
 }
 

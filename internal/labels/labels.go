@@ -37,9 +37,11 @@ const (
 	FirefoxRoot    = RoamingAppData + "/Mozilla/Firefox" // holds profiles.ini and Profiles/
 )
 
-// Labels the Linux router understands that NO Windows code produces yet
-// (SYSTEM-REVIEW §2.8: Wi-Fi and printer export do not exist). They are not in
-// Folders, and the join test does not pretend they arrive.
+// Labels for the two things that are not known folders (SYSTEM-REVIEW §2.8).
+// They are not in Folders: cmd/auros-migrate writes them itself — one
+// WLAN_profile XML per saved network under WiFi, and printers.FileName under
+// Printers — and TestJoin_WiFiAndPrintersReachTheLinuxConsumers passes that
+// output through the Linux router and handlers.
 const (
 	WiFi     = "WiFi"
 	Printers = "Printers"
