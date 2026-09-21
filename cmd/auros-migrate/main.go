@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -152,6 +151,11 @@ func run() error {
 		fmt.Printf("  after your choice (%s): %s to copy\n", choice, humanBytes(inventoryBytes))
 	}
 
+	// Wi-Fi networks and printers: read now, disclosed one by one below, and
+	// written into the archive at the start of phase 4.
+	x := gatherExtras(env)
+	fmt.Printf("  %d saved Wi-Fi network(s), %d printer(s)\n", len(x.wifi), len(x.printers))
+
 	// ---- phase 2: DISCLOSE (reads only) ----
 	if err := m.Advance(safety.PhaseDisclose); err != nil {
 		return err
@@ -161,7 +165,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("disclose: %w", err)
 	}
-	printDisclosure(programs)
+	printDisclosure(os.Stdout, programs, x)
 	if !cfg.acknowledged {
 		return errors.New("you must read the list above and pass " +
 			"--i-understand-programs-do-not-migrate to continue")
@@ -221,8 +225,36 @@ func run() error {
 	section(mode, safety.PhaseCopy)
 	q := quarantine.NewSet(time.Now)
 
+	// The Wi-Fi and printer exports are staged on the DESTINATION, under the
+	// metadata directory verify does not count, and copied into the archive
+	// from there like any other file — hashed, recorded, verified. The staging
+	// copy is removed after the copy, so the plain-text keys are on the drive
+	// once, inside the archive, and nowhere on this machine.
+	if err := dest.Reassert(); err != nil {
+		m.Abort("copy: " + err.Error())
+		return fmt.Errorf("copy: %w", err)
+	}
+	exportDir := filepath.Join(dest.Dir(), manifest.MetaDir, exportDirName)
+	extraSources, serr := x.stage(exportDir)
+	removeExport := func() {
+		if err := os.RemoveAll(exportDir); err != nil {
+			fmt.Fprintf(os.Stderr, "  WARNING: could not remove the staging copy of the Wi-Fi export at %s: %v\n", exportDir, err)
+		}
+	}
+	if serr != nil {
+		removeExport()
+		m.Abort("copy: " + serr.Error())
+		return fmt.Errorf("copy: %w", serr)
+	}
+	// Counts only. A profile's XML may hold its key in plain text and never
+	// goes near the run log.
+	log.Event(safety.PhaseCopy.String(), "extras-staged", runlog.Fields{
+		"wifi_profiles": len(x.wifi),
+		"printers":      len(x.printers),
+	})
+
 	copyOpts := copyengine.Options{}
-	copyOpts.Sources = sources
+	copyOpts.Sources = append(append([]copyengine.Source(nil), sources...), extraSources...)
 	copyOpts.DestRoot = dest.Dir()
 	copyOpts.AssertDestination = dest.Reassert
 	copyOpts.ResumeIdentity = dest.Volume().GUID
@@ -234,6 +266,7 @@ func run() error {
 	copyOpts.Progress = progressPrinter()
 
 	cres, cerr := copyengine.Run(ctx, copyOpts)
+	removeExport()
 	fmt.Print("\n" + cres.Describe())
 	if cerr != nil {
 		m.Abort("copy: " + cerr.Error())
@@ -335,27 +368,6 @@ func printFirmware(fw winenv.Firmware) {
 	for _, n := range fw.Notes {
 		fmt.Printf("    - %s\n", n)
 	}
-}
-
-// printDisclosure is prohibition §4.2 and SAFETY.md phase 2. It prints the
-// actual installed-programs list by name. Not a generic warning: the literal
-// list, because a school that finds out at month two that their attendance
-// software is gone becomes a refund and a story.
-func printDisclosure(programs []winenv.Program) {
-	fmt.Printf("\n  WHAT DOES NOT COME ACROSS\n")
-	fmt.Printf("  Windows programs do not migrate. Not any of them. These %d will be gone:\n\n", len(programs))
-	names := make([]string, 0, len(programs))
-	for _, p := range programs {
-		names = append(names, p.Name)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		fmt.Printf("    - %s\n", n)
-	}
-	fmt.Println("\n  Your files, browser bookmarks and history, Wi-Fi networks, printers and")
-	fmt.Println("  account name do come across.")
-	fmt.Println("  Saved passwords, cookies and payment details in Chrome and Edge DO NOT.")
-	fmt.Println("  Export or sync them before you start.")
 }
 
 func printQuarantine(q *quarantine.Set) {

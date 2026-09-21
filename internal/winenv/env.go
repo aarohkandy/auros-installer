@@ -13,10 +13,13 @@
 package winenv
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/aarohkandy/auros-installer/internal/printers"
 )
 
 // TriState exists because "we do not know" is a real and common answer for
@@ -98,6 +101,24 @@ type PlaceholderStats struct {
 	OnDiskSize  int64 // what they occupy now
 }
 
+// WiFiProfile is one saved wireless profile, as WlanGetProfile returned it.
+//
+// XML is the WLAN_profile schema document. When the tool runs as an
+// administrator it carries the network key IN PLAIN TEXT (<protected>false),
+// otherwise the DPAPI-sealed form (<protected>true), which is useless on any
+// other machine. Either way it is a secret: it is never logged, never printed,
+// and never put in an error message.
+type WiFiProfile struct {
+	Name string
+	XML  string
+}
+
+// ErrNoWLAN means this machine has no wireless service to ask: wlanapi.dll is
+// absent (Server SKUs without the feature) or the WLAN AutoConfig service is
+// not running (a desktop with no Wi-Fi card). It is not "no saved networks":
+// the caller says which one it was.
+var ErrNoWLAN = errors.New("winenv: the Windows wireless service is not available")
+
 // Env is the whole Windows surface. Nothing outside this package calls Win32.
 type Env interface {
 	Platform() string
@@ -107,6 +128,15 @@ type Env interface {
 	SystemVolume() (Volume, error)
 	Firmware() (Firmware, error)
 	CloudPlaceholders(root string) (PlaceholderStats, error)
+
+	// WiFiProfiles returns every saved wireless profile on every wireless
+	// interface, asking for the plain-text key. Reads only.
+	WiFiProfiles() ([]WiFiProfile, error)
+
+	// Printers returns the installed printers and printer connections, with
+	// Port rewritten to what the Linux half can act on: the address behind a
+	// Standard TCP/IP port, or \\server\queue for a connection. Reads only.
+	Printers() ([]printers.Printer, error)
 
 	// VolumeForPath names the volume that ACTUALLY holds path, by asking the
 	// operating system rather than by comparing the path against a list of
@@ -161,6 +191,9 @@ type SyntheticConfig struct {
 	Vols         []Volume
 	FW           Firmware
 	Placeholders PlaceholderStats
+	WiFi         []WiFiProfile
+	WiFiErr      error
+	Printers     []printers.Printer
 	Err          error // if set, every method returns it
 }
 
@@ -259,6 +292,23 @@ func (e *syntheticEnv) CloudPlaceholders(string) (PlaceholderStats, error) {
 		return PlaceholderStats{}, e.cfg.Err
 	}
 	return e.cfg.Placeholders, nil
+}
+
+func (e *syntheticEnv) WiFiProfiles() ([]WiFiProfile, error) {
+	if e.cfg.Err != nil {
+		return nil, e.cfg.Err
+	}
+	if e.cfg.WiFiErr != nil {
+		return nil, e.cfg.WiFiErr
+	}
+	return append([]WiFiProfile(nil), e.cfg.WiFi...), nil
+}
+
+func (e *syntheticEnv) Printers() ([]printers.Printer, error) {
+	if e.cfg.Err != nil {
+		return nil, e.cfg.Err
+	}
+	return append([]printers.Printer(nil), e.cfg.Printers...), nil
 }
 
 // DefaultSynthetic is a plausible 2014 school laptop: BitLocker on, TPM 1.2,
