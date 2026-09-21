@@ -377,11 +377,11 @@ func WarmProfile(s *UserSession, workDir, corpusRoot string) (map[string]string,
 
 // quiesceServices are stopped and disabled before any measurement.
 var quiesceServices = []string{
-	"wuauserv",  // Windows Update
-	"UsoSvc",    // the update orchestrator
-	"DoSvc",     // delivery optimisation
-	"gupdate",   // Google's updater
-	"gupdatem",  // Google's updater, the other one
+	"wuauserv", // Windows Update
+	"UsoSvc",   // the update orchestrator
+	"DoSvc",    // delivery optimisation
+	"gupdate",  // Google's updater
+	"gupdatem", // Google's updater, the other one
 	"MozillaMaintenance",
 	"edgeupdate",
 	"edgeupdatem",
