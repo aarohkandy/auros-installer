@@ -228,6 +228,9 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	res.Deviations = devs
 
 	res.Claims, _ = ReadClaims(destForCheck)
+	if res.Claims != nil {
+		res.Claims.ArmPlanPrinted, res.Claims.ArmPerformed = ReadArmOutcome(stdout)
+	}
 	res.Manifest, _ = ReadInstallerManifest(destForCheck)
 	res.Quarantine = ReadQuarantineReport(destForCheck)
 	if res.Claims != nil {
@@ -648,6 +651,11 @@ func tail(s string, n int) string {
 // and must not be lost in it either.
 func fidelityFindings(g *Golden, res *Result) []string {
 	var out []string
+	if res.Claims != nil && res.Claims.Events > 0 && !res.Claims.SawPhaseEvents {
+		out = append(out, "the run log on the destination carries no phase transitions, no abort reason "+
+			"and no wall record: cmd/auros-migrate builds the state machine with a nil logger, so "+
+			"SAFETY.md rule 5's post-mortem is missing the entries a post-mortem is for")
+	}
 	if n := g.Placeholders(); n > 0 {
 		out = append(out, fmt.Sprintf("%d files carried FILE_ATTRIBUTE_OFFLINE (OneDrive placeholders, "+
 			"attribute-only fidelity) and the run was given --cloud-files=hydrate", n))

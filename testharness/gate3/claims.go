@@ -76,6 +76,23 @@ type Claims struct {
 	// and the privileged steps are compiled out of the binary under test.
 	CrossedWall bool `json:"crossed_wall"`
 
+	// ArmPlanPrinted and ArmPerformed come from the installer's OUTPUT, not from
+	// its run log, and the difference is a finding in itself.
+	//
+	// cmd/auros-migrate builds the state machine with a nil logger
+	// (`safety.NewMachine(mode, nil)`) and opens the run log a few lines later,
+	// so the machine's own events — every phase transition, the abort and its
+	// reason, and the wall crossing — are written nowhere. SAFETY.md rule 5 puts
+	// the run log on the destination so a post-mortem survives a machine that
+	// will not boot; as it stands that post-mortem is missing exactly the
+	// entries a post-mortem is for. The harness therefore reads the arm outcome
+	// from what the installer printed, and says so.
+	ArmPlanPrinted bool `json:"arm_plan_printed"`
+	ArmPerformed   bool `json:"arm_performed"`
+	// SawPhaseEvents records whether the run log contains any phase transition
+	// at all, which is how the finding above is detected rather than assumed.
+	SawPhaseEvents bool `json:"run_log_has_phase_events"`
+
 	Aborted     bool     `json:"aborted"`
 	AbortReason string   `json:"abort_reason,omitempty"`
 	Refusals    []string `json:"refusals,omitempty"`
@@ -128,6 +145,8 @@ func ReadClaims(destRoot string) (*Claims, error) {
 				c.ReachedWall = true
 			case ev.Kind == "wall-crossed":
 				c.CrossedWall = true
+			case ev.Kind == "phase-enter":
+				c.SawPhaseEvents = true
 			case ev.Kind == "abort":
 				c.Aborted = true
 				c.AbortReason = ev.Reason
@@ -310,6 +329,19 @@ func ReadQuarantineReport(destRoot string) *QuarantineReport {
 		}
 	}
 	return out
+}
+
+// ReadArmOutcome reads the end of the installer's output: in a dry run it
+// prints the plan it did NOT perform, and in a committed run it prints what it
+// did. Both sentences come from safety.ArmResult.Describe.
+func ReadArmOutcome(stdout string) (planPrinted, performed bool) {
+	if strings.Contains(stdout, "no step below was performed; nothing on this machine was changed") {
+		planPrinted = true
+	}
+	if strings.Contains(stdout, "\nperformed:\n") || strings.Contains(stdout, "STOPPED at step") {
+		performed = true
+	}
+	return planPrinted, performed
 }
 
 // InventoryLines are the "  Documents        C:\...\Documents" lines the

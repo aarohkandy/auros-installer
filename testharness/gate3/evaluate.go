@@ -119,9 +119,15 @@ func (r *Result) Evaluate(sc *Scenario, expectedFiles int) {
 	case r.Claims.CrossedWall:
 		r.Add(CheckWallNotCrossed, false,
 			"THE RUN LOG SAYS THE WALL WAS CROSSED in a dry run with the privileged steps compiled out")
+	case r.Claims.ArmPerformed:
+		r.Add(CheckWallNotCrossed, false,
+			"the installer's own output says it PERFORMED an arm step: phase 6 ran in a dry run")
 	default:
-		r.Add(CheckWallNotCrossed, true, "the run log records no wall crossing (dry run, %d events)",
-			r.Claims.Events)
+		// The run log cannot carry a wall crossing (see Claims.ArmPlanPrinted),
+		// so this check leans on what the installer printed AND on C1, which is
+		// the measurement: the system disk did not change.
+		r.Add(CheckWallNotCrossed, true, "the installer performed no arm step, and the change journal "+
+			"agrees that nothing on C: moved (%d run-log events)", r.Claims.Events)
 	}
 
 	// ── C7: on a run that claims success, everything is actually there. ──
@@ -248,12 +254,15 @@ func (r *Result) evaluateOutcome(sc *Scenario, expectedFiles int) {
 		case c.VerifiedCount != expectedFiles:
 			r.Add(CheckOutcome, false, "the installer says it verified %d files; the corpus has %d",
 				c.VerifiedCount, expectedFiles)
-		case !c.ReachedWall:
+		case !c.ArmPlanPrinted:
 			r.Add(CheckOutcome, false,
-				"the installer never recorded reaching the wall: a dry run must say where it stopped")
+				"the installer never printed the plan it would have performed: a dry run has to say where "+
+					"it stopped, and this one does not say it stopped at the wall at all")
+		case c.ArmPerformed:
+			r.Add(CheckOutcome, false, "the installer PERFORMED an arm step in a dry run")
 		default:
-			r.Add(CheckOutcome, true, "succeeded, recorded a verified archive of %d files, and stopped at "+
-				"the wall as a dry run must", c.VerifiedCount)
+			r.Add(CheckOutcome, true, "succeeded, recorded a verified archive of %d files, and printed the "+
+				"arm plan as a dry run must — performing none of it", c.VerifiedCount)
 		}
 	}
 }

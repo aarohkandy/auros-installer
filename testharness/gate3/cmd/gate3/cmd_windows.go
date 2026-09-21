@@ -267,6 +267,16 @@ func cmdRun(args []string) error {
 	return nil
 }
 
+// errSuffix makes a report's own error visible. Without it, a window that
+// failed closed — a journal recreated underneath it, a read that errored —
+// prints as "0 records" and reads like a quiet machine.
+func errSuffix(r *gate3.SystemDiskReport) string {
+	if r == nil || r.Error == "" {
+		return ""
+	}
+	return "\n   the window could not be accounted for: " + r.Error
+}
+
 func cmdFormatDestination(args []string) error {
 	fs := flag.NewFlagSet("format-destination", flag.ExitOnError)
 	vol := fs.String("volume", "", `the volume to wipe, e.g. E:\`)
@@ -300,6 +310,13 @@ func cmdProveRed(args []string) error {
 	}
 	_ = work
 
+	// The journal is resized here rather than by the workflow, because resizing
+	// recreates it and the harness has to wait for that to settle before it
+	// marks anything.
+	if err := gate3.EnlargeJournal("C:", 512<<20, 64<<20); err != nil {
+		return err
+	}
+
 	// 1. A window in which nothing of ours touches C: must come back clean.
 	quiet, err := gate3.MarkUSN("C:")
 	if err != nil {
@@ -310,8 +327,9 @@ func cmdProveRed(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("idle window: %d records, %d excused as noise, %d unexplained\n",
-		quietRep.Records, quietRep.Excluded, len(quietRep.Unexplained))
+	fmt.Printf("idle window: %d records, %d excused as noise, %d unexplained (journal %d, USN %d..%d)%s\n",
+		quietRep.Records, quietRep.Excluded, len(quietRep.Unexplained),
+		quietRep.JournalID, quietRep.StartUSN, quietRep.EndUSN, errSuffix(quietRep))
 	for _, u := range quietRep.Unexplained {
 		fmt.Printf("   ! %s\n", u)
 	}
@@ -345,8 +363,9 @@ func cmdProveRed(args []string) error {
 	}
 	if !found {
 		return fmt.Errorf("THE SYSTEM-DISK CHECK DID NOT NOTICE a file created and deleted on C: "+
-			"during its window. It is decoration, not a check. (%d records, %d unexplained)",
-			rep.Records, len(rep.Unexplained))
+			"during its window. It is decoration, not a check. (%d records, %d unexplained, "+
+			"journal %d, USN %d..%d)%s",
+			rep.Records, len(rep.Unexplained), rep.JournalID, rep.StartUSN, rep.EndUSN, errSuffix(rep))
 	}
 	if quietRep.Records == 0 {
 		return fmt.Errorf("the idle window saw no change-journal records at all, which means the journal " +

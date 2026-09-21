@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -56,6 +57,43 @@ var (
 	procGetFinalPathNameByHW = modkernel32.NewProc("GetFinalPathNameByHandleW")
 )
 
+// The three FSCTL payloads, as STRUCTS with their natural alignment.
+//
+// They were byte arrays once. A [40]byte on the stack can land on any address,
+// and these structures are DWORDLONGs: the file system rejects a misaligned
+// buffer with ERROR_INVALID_USER_BUFFER — which is not deterministic, because
+// whether the array happens to be aligned depends on the build. The harness saw
+// it both ways: the journal read worked for three runs and then started failing
+// after an unrelated edit moved the stack around.
+type usnJournalData struct {
+	UsnJournalID                uint64
+	FirstUsn                    int64
+	NextUsn                     int64
+	LowestValidUsn              int64
+	MaxUsn                      int64
+	MaximumSize                 uint64
+	AllocationDelta             uint64
+	MinSupportedMajorVersion    uint16
+	MaxSupportedMajorVersion    uint16
+	Flags                       uint32
+	RangeTrackChunkSize         uint64
+	RangeTrackFileSizeThreshold int64
+}
+
+type readUSNJournalData struct {
+	StartUsn          int64
+	ReasonMask        uint32
+	ReturnOnlyOnClose uint32
+	Timeout           uint64
+	BytesToWaitFor    uint64
+	UsnJournalID      uint64
+}
+
+type createUSNJournalData struct {
+	MaximumSize     uint64
+	AllocationDelta uint64
+}
+
 // USNMark is the journal position at one instant.
 type USNMark struct {
 	JournalID uint64
@@ -94,24 +132,24 @@ func openVolume(letter string, write bool) (*usnVolume, error) {
 func (v *usnVolume) Close() { syscall.CloseHandle(v.h) }
 
 func (v *usnVolume) query() (USNMark, error) {
-	var buf [80]byte
+	var data usnJournalData
 	var ret uint32
-	err := syscall.DeviceIoControl(v.h, fsctlQueryUSNJournal, nil, 0, &buf[0], uint32(len(buf)), &ret, nil)
+	err := syscall.DeviceIoControl(v.h, fsctlQueryUSNJournal, nil, 0,
+		(*byte)(unsafe.Pointer(&data)), uint32(unsafe.Sizeof(data)), &ret, nil)
 	if err != nil {
 		return USNMark{}, fmt.Errorf("gate3: FSCTL_QUERY_USN_JOURNAL on %s: %w", v.letter, err)
 	}
 	if ret < 56 {
 		return USNMark{}, fmt.Errorf("gate3: FSCTL_QUERY_USN_JOURNAL returned %d bytes", ret)
 	}
-	m := USNMark{
+	return USNMark{
 		Volume:    v.letter,
-		JournalID: binary.LittleEndian.Uint64(buf[0:8]),
-		FirstUSN:  int64(binary.LittleEndian.Uint64(buf[8:16])),
-		NextUSN:   int64(binary.LittleEndian.Uint64(buf[16:24])),
-		LowestUSN: int64(binary.LittleEndian.Uint64(buf[24:32])),
-		MaxSize:   binary.LittleEndian.Uint64(buf[40:48]),
-	}
-	return m, nil
+		JournalID: data.UsnJournalID,
+		FirstUSN:  data.FirstUsn,
+		NextUSN:   data.NextUsn,
+		LowestUSN: data.LowestValidUsn,
+		MaxSize:   data.MaximumSize,
+	}, nil
 }
 
 // EnlargeJournal grows the change journal so a busy run cannot wrap it.
@@ -129,8 +167,7 @@ func EnlargeJournal(letter string, maxSize, delta uint64) error {
 	// A struct with uint64 fields, not a [16]byte: CREATE_USN_JOURNAL_DATA is two
 	// DWORDLONGs and the file system rejects a buffer that is not aligned for
 	// them with ERROR_INVALID_USER_BUFFER, which is what a byte array gets.
-	var in struct{ MaximumSize, AllocationDelta uint64 }
-	in.MaximumSize, in.AllocationDelta = maxSize, delta
+	in := createUSNJournalData{MaximumSize: maxSize, AllocationDelta: delta}
 	var ret uint32
 	err = syscall.DeviceIoControl(v.h, fsctlCreateUSNJournal, (*byte)(unsafe.Pointer(&in)),
 		uint32(unsafe.Sizeof(in)), nil, 0, &ret, nil)
@@ -146,7 +183,37 @@ func EnlargeJournal(letter string, maxSize, delta uint64) error {
 		return fmt.Errorf("gate3: FSCTL_CREATE_USN_JOURNAL on %s: %v; fsutil also failed: %v: %s",
 			letter, err, ferr, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return WaitForJournal(letter, 60*time.Second)
+}
+
+// WaitForJournal waits until the change journal has settled: two queries a
+// second apart that agree about the journal's identity.
+//
+// Resizing a journal deletes and recreates it, and the recreation is
+// asynchronous. A mark taken during it names a journal that is about to stop
+// existing, and every window opened from that mark then fails closed with "the
+// journal was recreated during the run" — correctly, and uselessly. This is how
+// the harness stops measuring across its own bookkeeping.
+func WaitForJournal(letter string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last uint64
+	stable := 0
+	for time.Now().Before(deadline) {
+		m, err := MarkUSN(letter)
+		if err == nil && m.JournalID != 0 {
+			if m.JournalID == last {
+				stable++
+				if stable >= 2 {
+					return nil
+				}
+			} else {
+				last, stable = m.JournalID, 0
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	return fmt.Errorf("gate3: the change journal on %s did not settle within %s: it is still being "+
+		"created or deleted, and a window opened now could not be accounted for", letter, timeout)
 }
 
 // MarkUSN reads the journal position on a volume.
@@ -214,7 +281,9 @@ func DiffUSN(start USNMark, extraExclusions []string) (*SystemDiskReport, error)
 
 	resolver := newPathResolver(v)
 	next := start.NextUSN
-	out := make([]byte, 1<<20)
+	// A []uint64 viewed as bytes, so the output buffer is 8-byte aligned too.
+	outWords := make([]uint64, (1<<20)/8)
+	out := unsafe.Slice((*byte)(unsafe.Pointer(&outWords[0])), len(outWords)*8)
 
 	// Two passes. The first reads every record and remembers, for every file
 	// reference the journal mentions, its name and its parent; the second turns
@@ -230,17 +299,15 @@ func DiffUSN(start USNMark, extraExclusions []string) (*SystemDiskReport, error)
 	}
 	var records []rec
 	for next < end.NextUSN {
-		var in [40]byte
-		binary.LittleEndian.PutUint64(in[0:8], uint64(next))
-		binary.LittleEndian.PutUint32(in[8:12], usnReasonMask)
-		binary.LittleEndian.PutUint32(in[12:16], 0) // ReturnOnlyOnClose
-		binary.LittleEndian.PutUint64(in[16:24], 0) // Timeout
-		binary.LittleEndian.PutUint64(in[24:32], 0) // BytesToWaitFor
-		binary.LittleEndian.PutUint64(in[32:40], start.JournalID)
+		in := readUSNJournalData{
+			StartUsn:     next,
+			ReasonMask:   usnReasonMask,
+			UsnJournalID: start.JournalID,
+		}
 
 		var ret uint32
-		if derr := syscall.DeviceIoControl(v.h, fsctlReadUSNJournal, &in[0], uint32(len(in)),
-			&out[0], uint32(len(out)), &ret, nil); derr != nil {
+		if derr := syscall.DeviceIoControl(v.h, fsctlReadUSNJournal, (*byte)(unsafe.Pointer(&in)),
+			uint32(unsafe.Sizeof(in)), &out[0], uint32(len(out)), &ret, nil); derr != nil {
 			rep.Error = fmt.Sprintf("FSCTL_READ_USN_JOURNAL at USN %d: %v", next, derr)
 			return rep, nil
 		}

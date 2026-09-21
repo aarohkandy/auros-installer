@@ -340,7 +340,8 @@ func newResultForTest(kind Kind) *Result {
 		Source:     &TreeReport{Tree: "source", Expected: 9, HashMatches: 9},
 		Archive:    &TreeReport{Tree: "archive", Expected: 9, Present: 9, HashMatches: 9},
 		SystemDisk: &SystemDiskReport{Records: 12, Excluded: 12},
-		Claims:     &Claims{ClaimedVerified: true, VerifiedCount: 9, ReachedWall: true, Events: 30},
+		Claims: &Claims{ClaimedVerified: true, VerifiedCount: 9, ReachedWall: true, Events: 30,
+			ArmPlanPrinted: true, SawPhaseEvents: true},
 		Inventory:  fullInventory(),
 		CorpusRoot: `C:\gate3\corpus`,
 	}
@@ -474,6 +475,29 @@ func TestRecomputeFailsWhenACheckIsSimplyMissing(t *testing.T) {
 	empty := &Result{}
 	if v, _ := empty.Recompute(nil); v == Pass {
 		t.Fatal("a result with no checks at all was scored as a pass")
+	}
+}
+
+func TestVerdictFailsWhenADryRunPerformedAnArmStep(t *testing.T) {
+	r := newResultForTest(KindClean)
+	r.Manifest = goodManifest()
+	r.manifestGolden = &Golden{}
+	r.Claims.ArmPerformed = true
+	r.Evaluate(nil, 9)
+	if v, _ := r.Recompute(RequiredChecks(KindClean, nil)); v == Pass {
+		t.Fatal("a dry run that performed a step on the other side of the wall was scored as a pass")
+	}
+}
+
+func TestReadArmOutcomeSeesADryRunAndACommittedOne(t *testing.T) {
+	dry := "mode: DRY RUN\nno step below was performed; nothing on this machine was changed.\n" +
+		"this is what --commit would do:\n  1. Suspend BitLocker…\n"
+	if plan, performed := ReadArmOutcome(dry); !plan || performed {
+		t.Fatalf("a dry run read as plan=%v performed=%v", plan, performed)
+	}
+	done := "mode: COMMIT\nperformed:\n  1. Suspend BitLocker…\n"
+	if _, performed := ReadArmOutcome(done); !performed {
+		t.Fatal("a run that performed an arm step read as though it had not")
 	}
 }
 

@@ -160,10 +160,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { name: bin, path: dist }
-      - name: Grow the change journal, then require the invariant check to go red
+      - name: The invariant check must go red when the system disk is written to
         run: |
-          fsutil usn createjournal m=536870912 a=67108864 C:
           fsutil usn queryjournal C:
+          # gate3 resizes the journal itself and waits for the resize to settle:
+          # resizing recreates the journal, and a window marked during that
+          # cannot be accounted for.
           .\dist\gate3.exe prove-red -work $env:RUNNER_TEMP
           if ($LASTEXITCODE -ne 0) { throw "the D27 invariant check did not go red when C: was written to" }
 
