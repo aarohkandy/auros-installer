@@ -335,9 +335,18 @@ func cmdProveRed(args []string) error {
 	if err := gate3.LabelLow(outDir); err != nil {
 		return err
 	}
-	tok, err := syscall.OpenCurrentProcessToken()
+	// syscall.OpenCurrentProcessToken opens with TOKEN_QUERY only, and
+	// DuplicateTokenEx needs a source handle opened with TOKEN_DUPLICATE
+	// (learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-duplicatetokenex).
+	// Run 35665472869 failed exactly there. The run path duplicates the
+	// TOKEN_ALL_ACCESS token launch_windows.go already holds, and works.
+	me, err := syscall.GetCurrentProcess()
 	if err != nil {
 		return err
+	}
+	var tok syscall.Token
+	if err := syscall.OpenProcessToken(me, syscall.TOKEN_DUPLICATE|syscall.TOKEN_QUERY, &tok); err != nil {
+		return fmt.Errorf("OpenProcessToken(TOKEN_DUPLICATE|TOKEN_QUERY): %w", err)
 	}
 	low, err := gate3.LowIntegrityToken(syscall.Handle(tok))
 	tok.Close()

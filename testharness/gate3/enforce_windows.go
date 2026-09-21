@@ -24,7 +24,13 @@ var (
 // TOKEN_MANDATORY_LABEL naming S-1-16-4096 and SE_GROUP_INTEGRITY, as in
 // "Designing Applications to Run at a Low Integrity Level"
 // (learn.microsoft.com/previous-versions/dotnet/articles/bb625960(v=msdn.10)).
-// The caller closes it.
+// tok must be open with TOKEN_DUPLICATE (DuplicateTokenEx); the copy is
+// requested with TOKEN_ALL_ACCESS, which covers TOKEN_ADJUST_DEFAULT for
+// SetTokenInformation(TokenIntegrityLevel) and the TOKEN_QUERY, TOKEN_DUPLICATE
+// and TOKEN_ASSIGN_PRIMARY that CreateProcessWithTokenW requires of its token
+// (learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createprocesswithtokenw;
+// its caller needs SeImpersonatePrivilege, which the elevated runner account
+// holds). The caller closes it.
 func LowIntegrityToken(tok syscall.Handle) (syscall.Handle, error) {
 	var dup syscall.Handle
 	if r, _, e := procDuplicateTokenEx.Call(uintptr(tok), tokenAllAccess, 0, securityImpersonation,
