@@ -284,7 +284,7 @@ const (
 // by itself; what it then does through the handle is traced as Write,
 // SetInformation, SetDelete or Rename. The trace does not carry the access
 // requested, so an open for write that writes nothing is invisible here — the
-// deny ACE is what stops it, and a denied open is caught by its status.
+// Low integrity is what stops it, and a denied open is caught by its status.
 func createWrites(opts string) (write, unknown bool) {
 	v, err := strconv.ParseUint(opts, 0, 32)
 	if err != nil {

@@ -17,4 +17,5 @@ func cmdMintToken(_ []string) error         { return errWindowsOnly }
 func cmdPrepare(_ []string) error           { return errWindowsOnly }
 func cmdRun(_ []string) error               { return errWindowsOnly }
 func cmdProveRed(_ []string) error          { return errWindowsOnly }
+func cmdProveRedChild(_ []string) error     { return errWindowsOnly }
 func cmdFormatDestination(_ []string) error { return errWindowsOnly }

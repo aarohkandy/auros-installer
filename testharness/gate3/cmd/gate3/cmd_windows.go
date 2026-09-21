@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -294,16 +295,16 @@ func cmdFormatDestination(args []string) error {
 // cmdProveRed is DECISIONS.md D34 applied to C1, the one check that cannot be
 // exercised anywhere but here.
 //
-// This process stands in for the installer's tree. Under the same ETW trace a
-// run uses, it opens a C: file read-only, writes a file to C: outside any
-// exemption, tries to write into a directory carrying the same deny ACE a run
-// puts on C:\ (applied by the same code, to a directory rather than the whole
-// volume), and writes into a directory declared exempt. Each must land in its
-// own bucket, and C1 must go red. A check nobody has watched fail is a check
-// nobody knows works.
+// It starts a copy of itself the way a run starts the installer — at Low
+// integrity, through the same launcher, under the same ETW trace — and that
+// child reads a C: file, writes into a directory labelled Low that is NOT
+// exempt (standing in for something like LocalLow), tries to write into an
+// ordinary (Medium) directory, which Windows must refuse, and writes into a
+// Low directory declared exempt. Each must land in its own bucket, and C1 must
+// go red. A check nobody has watched fail is a check nobody knows works.
 func cmdProveRed(args []string) error {
 	fs := flag.NewFlagSet("prove-red", flag.ExitOnError)
-	work := fs.String("work", "", "a working directory")
+	work := fs.String("work", "", "a working directory, not on C:")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -311,66 +312,67 @@ func cmdProveRed(args []string) error {
 		return err
 	}
 	if *work == "" {
-		*work = os.TempDir()
+		return fmt.Errorf("-work is required")
+	}
+	root := `C:\auros-gate3-prove-red`
+	os.RemoveAll(root)
+	defer os.RemoveAll(root)
+	for _, d := range []string{"denied", "lowspot", "exempt"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			return err
+		}
+	}
+	// Labelled here directly: gate3.LabelLow refuses C:, which is the point of it.
+	for _, d := range []string{"lowspot", "exempt"} {
+		if out, err := exec.Command("icacls", filepath.Join(root, d), "/setintegritylevel", "(OI)(CI)L").CombinedOutput(); err != nil {
+			return fmt.Errorf("labelling %s Low: %v: %s", d, err, out)
+		}
+	}
+	outDir := filepath.Join(*work, "gate3-prove-red-out")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+	if err := gate3.LabelLow(outDir); err != nil {
+		return err
 	}
 	tok, err := syscall.OpenCurrentProcessToken()
 	if err != nil {
 		return err
 	}
-	u, err := tok.GetTokenUser()
+	low, err := gate3.LowIntegrityToken(syscall.Handle(tok))
 	tok.Close()
 	if err != nil {
 		return err
 	}
-	sid, err := u.User.Sid.String()
+	defer syscall.CloseHandle(low)
+	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-
-	root := `C:\auros-gate3-prove-red`
-	denied, exempt := filepath.Join(root, "denied"), filepath.Join(root, "exempt")
-	os.RemoveAll(root)
-	for _, d := range []string{denied, exempt} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return err
-		}
-	}
-	defer os.RemoveAll(root)
-	ace, err := gate3.ApplyDeny(denied, sid)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := gate3.RemoveDeny(denied, sid); err != nil {
-			fmt.Printf("gate3: %v\n", err)
-		}
-	}()
-	fmt.Printf("deny ACE on %s: %s\n", denied, ace)
 
 	trace, err := gate3.StartTrace(filepath.Join(*work, "gate3-prove-red-etw"))
 	if err != nil {
 		return err
 	}
 	defer trace.Stop()
-
-	hosts := filepath.Join(os.Getenv("SystemRoot"), "System32", "drivers", "etc", "hosts")
-	if _, err := os.ReadFile(hosts); err != nil {
+	outFile := filepath.Join(outDir, "child.txt")
+	proc, err := gate3.StartInstaller(&gate3.UserSession{Token: low}, self, []string{"prove-red-child", root},
+		outFile, outDir)
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(root, "written.tmp"), []byte("a tool wrote this to C:\n"), 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(denied, "blocked.tmp"), []byte("x"), 0o644); err == nil {
-		return fmt.Errorf("the deny ACE %s did not stop a write into %s", ace, denied)
-	} else {
-		fmt.Printf("the deny ACE refused the write, as it must: %v\n", err)
-	}
-	if err := os.WriteFile(filepath.Join(exempt, "allowed.tmp"), []byte("x"), 0o644); err != nil {
-		return err
-	}
+	code, timedOut := proc.Wait(2 * time.Minute)
+	pid := proc.PID()
+	proc.Close()
 	time.Sleep(2 * time.Second)
+	said, _ := os.ReadFile(outFile)
+	fmt.Printf("the Low child said (exit %d):\n%s\n", code, said)
+	if timedOut || code != 0 {
+		return fmt.Errorf("the Low-integrity child did not behave as a Low process must (exit %d, timed out %v)", code, timedOut)
+	}
 
-	attr := trace.Attribute([]uint32{uint32(os.Getpid())})
+	exempt := filepath.Join(root, "exempt")
+	attr := trace.Attribute([]uint32{pid})
 	fmt.Printf("trace events: %v\n", attr.Events)
 	for id, fields := range attr.Schema {
 		fmt.Printf("schema Kernel-File/%s: %s\n", id, fields)
@@ -396,27 +398,52 @@ func cmdProveRed(args []string) error {
 		}
 		return false
 	}
+	all := append(append(append([]string{}, w.Writes...), w.Denied...), w.Exempt...)
 	for _, c := range []struct {
 		ok   bool
 		what string
 	}{
-		{in(w.Writes, `prove-red\written.tmp`), "the write to C: outside the exemptions is not under writes"},
-		{in(w.Denied, `denied\blocked.tmp`), "the write the deny ACE refused is not under denied attempts"},
+		{in(w.Writes, `lowspot\written.tmp`), "the write to C: outside the exemptions is not under writes"},
+		{in(w.Denied, `denied\blocked.tmp`), "the write Windows refused is not under denied attempts"},
 		{in(w.Exempt, `exempt\allowed.tmp`), "the write into the exemption is not under exempt writes"},
 		{!in(w.Writes, `exempt\`) && !in(w.Denied, `exempt\`), "a write into the exemption was counted against the run"},
 		{!in(w.Writes, `blocked.tmp`) && !in(w.Exempt, `blocked.tmp`), "the refused write landed in the wrong bucket"},
-		{!in(append(append(w.Writes, w.Denied...), w.Exempt...), `\hosts`), "a read-only open of " + hosts + " was counted as a write"},
+		{!in(all, `\hosts`), "a read-only open of the hosts file was counted as a write"},
 	} {
 		if !c.ok {
 			return fmt.Errorf("C1's classification is wrong on a real trace: %s", c.what)
 		}
 	}
-	enf := &gate3.Enforcement{Path: denied, SID: sid, ACE: ace, Applied: true, Verified: true, Exemptions: []string{exempt}}
+	enf := &gate3.Enforcement{Mechanism: "prove-red", Integrity: gate3.LowIntegritySID, Verified: true,
+		Exemptions: []string{exempt}}
 	ok, detail := gate3.SystemDiskVerdict(enf, w)
 	fmt.Printf("C1 on this window: ok=%v: %s\n", ok, detail)
 	if ok {
 		return fmt.Errorf("C1 PASSED a window in which C: was written to: it is decoration, not a check")
 	}
 	fmt.Println("C1 goes red on a write to C: and on a refused attempt, and does not count reads or the exemption")
+	return nil
+}
+
+// cmdProveRedChild is prove-red's stand-in for the installer, run at Low.
+func cmdProveRedChild(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: prove-red-child ROOT")
+	}
+	root := args[0]
+	if _, err := os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "System32", "drivers", "etc", "hosts")); err != nil {
+		return fmt.Errorf("a Low process could not READ from C:, and the installer must: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "lowspot", "written.tmp"), []byte("x"), 0o644); err != nil {
+		return fmt.Errorf("writing into a Low-labelled directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "denied", "blocked.tmp"), []byte("x"), 0o644); err == nil {
+		return fmt.Errorf("a Low process WROTE into an unlabelled (Medium) directory on C:: no-write-up did not hold")
+	} else {
+		fmt.Printf("refused, as it must be: %v\n", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "exempt", "allowed.tmp"), []byte("x"), 0o644); err != nil {
+		return fmt.Errorf("writing into the exempt Low directory: %w", err)
+	}
 	return nil
 }

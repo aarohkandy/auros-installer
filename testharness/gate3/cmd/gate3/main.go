@@ -50,6 +50,8 @@ func main() {
 		err = cmdRun(os.Args[2:])
 	case "prove-red":
 		err = cmdProveRed(os.Args[2:])
+	case "prove-red-child": // prove-red's stand-in for the installer, started at Low integrity
+		err = cmdProveRedChild(os.Args[2:])
 	case "format-destination":
 		err = cmdFormatDestination(os.Args[2:])
 	case "help", "-h", "--help":

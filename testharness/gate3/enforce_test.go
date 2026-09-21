@@ -55,9 +55,9 @@ func TestAuditWritesCatchesEveryInstallerWriteToC(t *testing.T) {
 			create("200", "0xab", "0xfb", 2, cDev+`\Users\auros-gate3x\z`)}, writesOf, `c:\users\auros-gate3x\z`},
 		"a Create with no CreateOptions": {[]string{kfEv(12, "200", "Irp", "0xa8", "FileName", cDev+`\z.tmp`)},
 			writesOf, "did not carry"},
-		"an open the ACE refused": {[]string{create("200", "0xa9", "0xf9", 1, cDev+`\gate3\corpus\c.txt`),
+		"an open Windows refused": {[]string{create("200", "0xa9", "0xf9", 1, cDev+`\gate3\corpus\c.txt`),
 			opEnd("0xa9", "0xC0000022")}, deniedOf, `c:\gate3\corpus\c.txt — create refused with status_access_denied`},
-		"a create the ACE refused, status in decimal": {[]string{create("200", "0xaa", "0xfa", 2, cDev+`\ProgramData\q`),
+		"a create Windows refused, status in decimal": {[]string{create("200", "0xaa", "0xfa", 2, cDev+`\ProgramData\q`),
 			opEnd("0xaa", "3221225506")}, deniedOf, `c:\programdata\q`},
 	} {
 		a := ParseTrace(strings.NewReader(etwXML(append(append([]string{}, base...), c.events...)...)),
@@ -66,7 +66,7 @@ func TestAuditWritesCatchesEveryInstallerWriteToC(t *testing.T) {
 		if !contains(c.bucket(w), c.want) {
 			t.Errorf("%s: %q not found in %+v", name, c.want, w)
 		}
-		enf := &Enforcement{Path: `C:\`, Applied: true, Verified: true, Exemptions: []string{exemptProfile}}
+		enf := &Enforcement{Integrity: LowIntegritySID, Verified: true, Exemptions: []string{exemptProfile}}
 		if ok, detail := SystemDiskVerdict(enf, w); ok {
 			t.Errorf("%s: C1 passed: %s", name, detail)
 		}
@@ -99,16 +99,22 @@ func TestAuditWritesPassesWhatIsNotTheInstallerWritingToC(t *testing.T) {
 	if len(w.Exempt) != 2 || !contains(w.Exempt, `\appdata\local\temp\t.tmp`) {
 		t.Fatalf("writes inside the exemption must be listed, got %v", w.Exempt)
 	}
-	enf := &Enforcement{Path: `C:\`, ACE: "(D;OICI;0x00010156;;;S-1-5-21-1)", Applied: true, Verified: true,
-		Removed: true, Exemptions: []string{exemptProfile}}
+	enf := &Enforcement{Integrity: LowIntegritySID, Verified: true, Exemptions: []string{exemptProfile}}
 	if ok, detail := SystemDiskVerdict(enf, w); !ok {
 		t.Fatalf("C1 failed a clean trace: %s", detail)
 	}
 }
 
-func TestDenyMaskIsTheDocumentedRights(t *testing.T) {
-	if DenyMask != 0x00010156 || DenyInherit != 0x3 {
-		t.Fatalf("mask 0x%08X inherit 0x%x", DenyMask, DenyInherit)
+func TestEnforcementFailsClosed(t *testing.T) {
+	for name, e := range map[string]*Enforcement{
+		"none":       nil,
+		"unverified": {Integrity: LowIntegritySID},
+		"a probe that wrote to C:": {Integrity: LowIntegritySID, Verified: true,
+			Error: `md C:\ProgramData\x at Low: exit 0, created true`},
+	} {
+		if ok, _ := SystemDiskVerdict(e, &WriteAudit{Events: 5}); ok {
+			t.Errorf("%s: C1 passed", name)
+		}
 	}
 }
 

@@ -294,9 +294,11 @@ func (r *Result) Summary(required []string) string {
 			r.Archive.Present, r.Archive.HashMatches, len(r.Archive.Corrupt), len(r.Archive.Extra), len(r.Archive.Partials))
 	}
 	if e := r.Enforcement; e != nil {
-		fmt.Fprintf(&b, "   deny ACE : %s on %s (applied %v in %.0fs, verified %v, removed %v in %.0fs), exempt: %s\n",
-			orNone(e.ACE), e.Path, e.Applied, e.ApplySec, e.Verified, e.Removed, e.RemoveSec,
-			strings.Join(e.Exemptions, ", "))
+		fmt.Fprintf(&b, "   enforce  : %s at %s, verified %v, labelled Low: %s, exempt: %s\n",
+			e.Mechanism, e.Integrity, e.Verified, strings.Join(e.LabeledLow, ", "), strings.Join(e.Exemptions, ", "))
+		if e.Error != "" {
+			fmt.Fprintf(&b, "              ! %s\n", e.Error)
+		}
 		for _, p := range e.Probes {
 			fmt.Fprintf(&b, "              probe: %s\n", p)
 		}
