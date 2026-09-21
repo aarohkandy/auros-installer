@@ -171,6 +171,7 @@ jobs:
             GOARCH=$arch go build -trimpath -o /tmp/gen-$arch.exe        ./gen
             GOARCH=$arch go build -trimpath -o /tmp/faultagent-$arch.exe ./fault/cmd/faultagent
             GOARCH=$arch go build -trimpath -o /tmp/bootbeacon-$arch.exe ./runner/cmd/bootbeacon
+            GOARCH=$arch go build -trimpath -o /tmp/gate3-$arch.exe      ./gate3/cmd/gate3
             GOARCH=$arch go vet ./...
           done
 

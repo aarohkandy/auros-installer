@@ -1,70 +1,320 @@
-# TEMPORARY PROBE — measures the hosted Windows runner before the Gate 3 harness is built on it.
+# GATE 3 — 100 clean migrations and the induced-failure suite, against ephemeral Windows.
+#
+# Spec §6C exit conditions:
+#   100 consecutive runs against Windows with 18,000 synthetic files: 100 successes, zero files lost,
+#   zero corrupted. 20 runs with induced failure: 20 clean aborts, zero data loss, and the system disk
+#   untouched every time. THE ABORT PATH IS TESTED MORE THAN THE HAPPY PATH.
+#
+# WHY A HOSTED RUNNER (DECISIONS.md D27)
+# Spec §4.7: "Windows in a VM, with synthetic files, destroyed repeatedly." A `windows-latest` runner is
+# destroyed after every job by construction. It is not the operator's machine, and there are twenty of
+# them at once for free.
+#
+# WHY WE ASSERT THE INVARIANT RATHER THAN THE CONSEQUENCE
+# The spec asks that "Windows still boots normally every time". That is the consequence; the property
+# that guarantees it is that nothing was written to the system disk. Every run here reads the NTFS
+# CHANGE JOURNAL across the window the installer ran in and requires the remainder, after a published
+# noise list, to be empty. That is stronger than a before/after file listing — it sees a file created
+# and deleted again, a change that did not alter a file's length, an attribute change and a new
+# alternate data stream, none of which a name-and-size diff can — and it is the only form of the check
+# that fits in the time: C: on this runner holds 1.19 million files and one enumeration pass measured
+# 276 seconds, so the listing version would have been 18 hours of enumeration per suite and would have
+# been quietly weakened instead.
+#
+# WHAT THE HARNESS DOES ABOUT KNOWN FOLDERS
+# `auros-migrate` inventories the known folders of the account running it, always, by design. So the
+# harness creates a local account, redirects ITS known folders to the synthetic corpus, and runs the
+# installer as that account. Folder redirection is the configuration SAFETY.md phase 1 is written about;
+# it also means an installer that stopped asking Windows where the folders are would inventory nothing
+# and fail check C9. Nothing in internal/ or cmd/ was changed to make this work, and there is no
+# test-only switch in the shipped binary.
 name: gate3
 on:
   workflow_dispatch:
     inputs:
-      clean_runs: { description: 'unused in probe', default: '100', type: string }
+      clean_shards:   { description: 'Clean shards',         default: '10', type: string }
+      runs_per_shard: { description: 'Clean runs per shard', default: '10', type: string }
+      profile:        { description: 'realistic | compact',  default: 'realistic', type: string }
+      faults:         { description: 'all, or F01,F02,…',    default: 'all', type: string }
+  schedule:
+    - cron: '0 3 * * *'
   push:
     paths: ['internal/**', 'cmd/**', 'testharness/**', '.github/workflows/gate3.yml']
+
+# The shape of a push-triggered run. Spec §6C is 100 clean runs; these are the numbers a run started by
+# a commit uses, and they are edited in a commit — visibly — when the full suite is wanted.
+env:
+  DEFAULT_CLEAN_SHARDS: '1'
+  DEFAULT_RUNS_PER_SHARD: '2'
+  DEFAULT_PROFILE: 'compact'
+  DEFAULT_FAULTS: 'F01,F07,G01'
+  CORPUS_ROOT: 'C:\gate3\corpus'
+  WORK_ROOT: 'D:\gate3'
+
 defaults:
   run:
     shell: pwsh
+
 permissions:
   contents: read
+
 jobs:
-  probe:
-    runs-on: windows-latest
-    timeout-minutes: 30
+  # ── Build once. Everything below runs the same bytes. ────────────────────────────────────────────
+  build:
+    runs-on: ubuntu-24.04
     steps:
-      - name: Identity, elevation, sessions
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.14', cache: true }
+      - name: Vet, test and cross-compile both modules
+        shell: bash -euo pipefail {0}
         run: |
-          $ErrorActionPreference = 'Continue'
-          whoami; whoami /groups | Select-String -Pattern 'Mandatory|Administrators'
-          whoami /priv
-          "session: $((Get-Process -Id $PID).SessionId)"
-          "EnableLUA: $((Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System).EnableLUA)"
-          "ConsentPromptBehaviorAdmin: $((Get-ItemProperty HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System).ConsentPromptBehaviorAdmin)"
-          Get-ChildItem env: | Where-Object { $_.Name -match 'RUNNER|GITHUB_WORKSPACE|ImageOS|ImageVersion|TEMP|TMP|USERPROFILE|LOCALAPPDATA|APPDATA|SystemDrive|PROCESSOR|NUMBER_OF' } | Format-Table -AutoSize | Out-String -Width 300
-          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, TotalVisibleMemorySize, FreePhysicalMemory | Format-List
-          Get-CimInstance Win32_ComputerSystem | Select-Object NumberOfLogicalProcessors, TotalPhysicalMemory | Format-List
-          Get-Process -Name Runner.Worker, Runner.Listener -ErrorAction SilentlyContinue | Select-Object Name, Id, Path, SessionId | Format-Table -AutoSize | Out-String -Width 300
-          Get-Service seclogon, Schedule, WinDefend, SysMain, wsearch -ErrorAction SilentlyContinue | Format-Table Name, Status, StartType -AutoSize
-      - name: Disks and volumes
+          gofmt -l . | tee /tmp/fmt; [ ! -s /tmp/fmt ] || { echo "gofmt found unformatted files"; exit 1; }
+          go vet ./...
+          go test ./... -race -count=1
+          ( cd testharness
+            gofmt -l . | tee /tmp/fmt2; [ ! -s /tmp/fmt2 ] || { echo "gofmt found unformatted files"; exit 1; }
+            go vet ./...
+            go test ./... -race -count=1 )
+          mkdir -p dist
+          # 386 as well as amd64: 2012-era machines running 32-bit Windows are inside our target cohort.
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/auros-migrate-amd64.exe ./cmd/auros-migrate
+          GOOS=windows GOARCH=386   go build -trimpath -ldflags="-s -w" -o dist/auros-migrate-386.exe   ./cmd/auros-migrate
+          ( cd testharness
+            GOOS=windows GOARCH=amd64 go build -trimpath -o ../dist/gen.exe   ./gen
+            GOOS=windows GOARCH=amd64 go build -trimpath -o ../dist/gate3.exe ./gate3/cmd/gate3
+            GOOS=windows GOARCH=386   go vet ./...
+            go build -trimpath -o ../dist/gate3-linux ./gate3/cmd/gate3 )
+          ls -la dist/
+      - name: The induced-failure catalogue this suite owes
+        shell: bash -euo pipefail {0}
+        run: ./dist/gate3-linux suite
+      - uses: actions/upload-artifact@v4
+        with: { name: bin, path: dist/ }
+
+  # ── Resolve the run shape once, so every job below agrees about it. ─────────────────────────────
+  plan:
+    needs: build
+    runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.m.outputs.shards }}
+      faults: ${{ steps.m.outputs.faults }}
+      fault_list: ${{ steps.m.outputs.fault_list }}
+      runs_per_shard: ${{ steps.m.outputs.runs_per_shard }}
+      clean_total: ${{ steps.m.outputs.clean_total }}
+      profile: ${{ steps.m.outputs.profile }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: bin, path: dist }
+      - id: m
+        shell: bash -euo pipefail {0}
         run: |
-          $ErrorActionPreference = 'Continue'
-          Get-Volume | Format-Table DriveLetter, FileSystemLabel, FileSystem, DriveType, Size, SizeRemaining -AutoSize | Out-String -Width 300
-          Get-Disk | Format-Table Number, FriendlyName, Size, PartitionStyle, IsBoot, IsSystem, BusType -AutoSize | Out-String -Width 300
-          mountvol
+          chmod +x dist/gate3-linux
+          SHARDS='${{ inputs.clean_shards }}';   SHARDS=${SHARDS:-$DEFAULT_CLEAN_SHARDS}
+          PER='${{ inputs.runs_per_shard }}';    PER=${PER:-$DEFAULT_RUNS_PER_SHARD}
+          PROFILE='${{ inputs.profile }}';       PROFILE=${PROFILE:-$DEFAULT_PROFILE}
+          FAULTS='${{ inputs.faults }}';         FAULTS=${FAULTS:-$DEFAULT_FAULTS}
+          if [ "$FAULTS" = all ]; then
+            FAULTS=$(dist/gate3-linux suite | awk 'NR>1 {printf "%s%s", sep, $1; sep=","}')
+          fi
+          echo "shards=$(seq 0 $((SHARDS-1)) | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+          echo "faults=$(echo "$FAULTS" | tr ',' '\n' | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
+          echo "fault_list=$FAULTS" >> $GITHUB_OUTPUT
+          echo "runs_per_shard=$PER" >> $GITHUB_OUTPUT
+          echo "clean_total=$((SHARDS*PER))" >> $GITHUB_OUTPUT
+          echo "profile=$PROFILE" >> $GITHUB_OUTPUT
+          echo "shape: $SHARDS shards x $PER runs, profile $PROFILE, faults: $FAULTS"
+
+  # ── The check that watches the check fail (DECISIONS.md D34). ────────────────────────────────────
+  prove-red:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: bin, path: dist }
+      - name: Grow the change journal, then require the invariant check to go red
+        run: |
+          fsutil usn createjournal m=536870912 a=67108864 C:
           fsutil usn queryjournal C:
-          fsutil behavior query disablelastaccess
-          (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -ErrorAction SilentlyContinue) | Format-List
-          Get-MpComputerStatus -ErrorAction SilentlyContinue | Select-Object RealTimeProtectionEnabled, AntivirusEnabled | Format-List
-          Get-MpPreference -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ExclusionPath
-      - name: VHD create on the temp disk, local user, CreateProcessWithLogon
+          .\dist\gate3.exe prove-red -work $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { throw "the D27 invariant check did not go red when C: was written to" }
+
+  # ── The clean runs. ─────────────────────────────────────────────────────────────────────────────
+  clean:
+    needs: [build, plan]
+    runs-on: windows-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false    # one shard failing must not hide the other ninety runs' results
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: bin, path: dist }
+      - name: A real second volume for the destination
         run: |
-          $ErrorActionPreference = 'Continue'
-          $vhd = "$env:RUNNER_TEMP\probe.vhdx"
-          "create vdisk file=`"$vhd`" maximum=2000 type=expandable`nselect vdisk file=`"$vhd`"`nattach vdisk`ncreate partition primary`nformat fs=ntfs quick label=PROBE`nassign letter=P" | Out-File -Encoding ascii "$env:RUNNER_TEMP\mk.txt"
-          Measure-Command { diskpart /s "$env:RUNNER_TEMP\mk.txt" | Out-Host } | Select-Object TotalSeconds
-          Get-Volume -DriveLetter P | Format-List
-          mountvol P: /L
-          icacls P:\
-          $pw = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 24 | ForEach-Object {[char]$_}) + '!Aa1'
-          $sec = ConvertTo-SecureString $pw -AsPlainText -Force
-          New-LocalUser -Name gate3probe -Password $sec -PasswordNeverExpires -AccountNeverExpires | Out-Null
-          Add-LocalGroupMember -Group Administrators -Member gate3probe
-          $cred = New-Object System.Management.Automation.PSCredential('gate3probe', $sec)
-          try {
-            $p = Start-Process -FilePath cmd.exe -ArgumentList '/c','whoami /groups > P:\who.txt 2>&1 & echo %USERPROFILE% >> P:\who.txt & echo %LOCALAPPDATA% >> P:\who.txt' -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory C:\
-            "exit: $($p.ExitCode)"
-          } catch { "Start-Process -Credential FAILED: $_" }
-          Get-Content P:\who.txt -ErrorAction SilentlyContinue
-          Get-ChildItem C:\Users -Force | Format-Table Name, LastWriteTime -AutoSize
-          Get-ChildItem C:\Users\gate3probe -Force -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum | Select-Object Count, Sum
-          Get-ChildItem C:\Users\gate3probe -Force -ErrorAction SilentlyContinue | Format-Table Name, Length, Attributes -AutoSize
-      - name: How long does a naive C:\ enumeration take
-        timeout-minutes: 12
+          # The destination must not be the system disk, and the installer verifies that by VOLUME GUID,
+          # not by drive letter. A subst'd letter or a plain directory would test a stub of the check
+          # that matters most, so this is a genuine second volume on the runner's temp disk.
+          $vhd = "$env:RUNNER_TEMP\auros-dest.vhdx"
+          @"
+          create vdisk file="$vhd" maximum=40000 type=expandable
+          select vdisk file="$vhd"
+          attach vdisk
+          create partition primary
+          format fs=ntfs quick label=AUROSDEST
+          assign letter=E
+          "@ | Out-File -Encoding ascii $env:RUNNER_TEMP\mk.txt
+          diskpart /s $env:RUNNER_TEMP\mk.txt
+          if (-not (Test-Path E:\)) { throw "the destination volume was not created" }
+          Get-Volume | Format-Table DriveLetter, FileSystemLabel, Size, SizeRemaining -AutoSize | Out-String -Width 200
+      - name: Mint the §4.7 token for this disposable machine
         run: |
-          $ErrorActionPreference = 'Continue'
-          $t = Measure-Command { $script:n = (Get-ChildItem C:\ -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object).Count }
-          "files on C: = $n in $($t.TotalSeconds) s"
+          .\dist\gate3.exe mint-token -corpus $env:CORPUS_ROOT -dest-volume E:\ -out $env:WORK_ROOT\token.json
+          if ($LASTEXITCODE -ne 0) { throw "the §4.7 guard refused this machine" }
+      - name: Generate 18,000 synthetic files and the golden manifest
+        run: |
+          .\dist\gen.exe generate -seed ${{ 20260921 + matrix.shard }} -root $env:CORPUS_ROOT `
+            -token $env:WORK_ROOT\token.json -manifest-dir $env:WORK_ROOT `
+            -profile ${{ needs.plan.outputs.profile }} -count 18000
+          if ($LASTEXITCODE -ne 0) { throw "the corpus was not generated" }
+      - name: Create the migration account and point its known folders at the corpus
+        run: |
+          .\dist\gate3.exe prepare -corpus $env:CORPUS_ROOT -work $env:WORK_ROOT\work `
+            -password-file $env:WORK_ROOT\pw.txt
+          if ($LASTEXITCODE -ne 0) { throw "the migration account could not be prepared" }
+      - name: Clean migrations of 18,000 files each
+        run: |
+          $failures = @()
+          foreach ($i in 0..(${{ needs.plan.outputs.runs_per_shard }} - 1)) {
+            $id = "clean-${{ matrix.shard }}-$i"
+            Write-Host "── $id ──"
+            .\dist\gate3.exe run -run-id $id -golden $env:WORK_ROOT\golden-manifest.jsonl `
+              -corpus $env:CORPUS_ROOT -tool (Resolve-Path .\dist\auros-migrate-amd64.exe) `
+              -dest-volume E:\ -work $env:WORK_ROOT\work -password-file $env:WORK_ROOT\pw.txt `
+              -profile ${{ needs.plan.outputs.profile }} -seed ${{ 20260921 + matrix.shard }} `
+              -out $env:WORK_ROOT\results\$id.json
+            if ($LASTEXITCODE -ne 0) { $failures += $id }
+          }
+          if ($failures.Count -gt 0) {
+            Write-Host "::error::shard ${{ matrix.shard }}: $($failures.Count) run(s) failed: $($failures -join ', ')"
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-clean-${{ matrix.shard }}
+          path: ${{ env.WORK_ROOT }}\results
+          if-no-files-found: warn
+
+  # ── The induced failures. The abort path, tested harder than the happy path. ────────────────────
+  faults:
+    needs: [build, plan]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.plan.outputs.faults) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: bin, path: dist }
+      - name: A real second volume, and a deliberately tiny third one
+        run: |
+          $vhd = "$env:RUNNER_TEMP\auros-dest.vhdx"
+          @"
+          create vdisk file="$vhd" maximum=40000 type=expandable
+          select vdisk file="$vhd"
+          attach vdisk
+          create partition primary
+          format fs=ntfs quick label=AUROSDEST
+          assign letter=E
+          "@ | Out-File -Encoding ascii $env:RUNNER_TEMP\mk.txt
+          diskpart /s $env:RUNNER_TEMP\mk.txt
+          # 64 MB: far too small for the corpus, which is the point of one scenario.
+          $tiny = "$env:RUNNER_TEMP\auros-tiny.vhdx"
+          @"
+          create vdisk file="$tiny" maximum=64 type=expandable
+          select vdisk file="$tiny"
+          attach vdisk
+          create partition primary
+          format fs=ntfs quick label=AUROSTINY
+          assign letter=F
+          "@ | Out-File -Encoding ascii $env:RUNNER_TEMP\mk2.txt
+          diskpart /s $env:RUNNER_TEMP\mk2.txt
+          if (-not (Test-Path E:\)) { throw "the destination volume was not created" }
+          if (-not (Test-Path F:\)) { throw "the too-small volume was not created" }
+      - name: Mint the §4.7 token for this disposable machine
+        run: |
+          .\dist\gate3.exe mint-token -corpus $env:CORPUS_ROOT -dest-volume E:\ -out $env:WORK_ROOT\token.json
+          if ($LASTEXITCODE -ne 0) { throw "the §4.7 guard refused this machine" }
+      - name: Generate 18,000 synthetic files and the golden manifest
+        run: |
+          .\dist\gen.exe generate -seed 20260921 -root $env:CORPUS_ROOT `
+            -token $env:WORK_ROOT\token.json -manifest-dir $env:WORK_ROOT `
+            -profile ${{ needs.plan.outputs.profile }} -count 18000
+          if ($LASTEXITCODE -ne 0) { throw "the corpus was not generated" }
+      - name: Create the migration account and point its known folders at the corpus
+        run: |
+          .\dist\gate3.exe prepare -corpus $env:CORPUS_ROOT -work $env:WORK_ROOT\work `
+            -password-file $env:WORK_ROOT\pw.txt
+          if ($LASTEXITCODE -ne 0) { throw "the migration account could not be prepared" }
+      - name: Induce ${{ matrix.scenario }} and require the behaviour the catalogue names
+        run: |
+          .\dist\gate3.exe run -scenario ${{ matrix.scenario }} -run-id ${{ matrix.scenario }} `
+            -golden $env:WORK_ROOT\golden-manifest.jsonl -corpus $env:CORPUS_ROOT `
+            -tool (Resolve-Path .\dist\auros-migrate-amd64.exe) `
+            -dest-volume E:\ -small-volume F:\ -work $env:WORK_ROOT\work `
+            -password-file $env:WORK_ROOT\pw.txt -profile ${{ needs.plan.outputs.profile }} -seed 20260921 `
+            -out $env:WORK_ROOT\results\${{ matrix.scenario }}.json
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::${{ matrix.scenario }} did not behave as the catalogue requires"
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-fault-${{ matrix.scenario }}
+          path: ${{ env.WORK_ROOT }}\results
+          if-no-files-found: warn
+
+  # ── The verdict, recomputed from the measurements. ──────────────────────────────────────────────
+  verdict:
+    needs: [build, plan, clean, faults, prove-red]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: bin, path: dist }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'results-*', path: results, merge-multiple: true }
+      - name: Gate 3 verdict
+        shell: bash -euo pipefail {0}
+        run: |
+          chmod +x dist/gate3-linux
+          ls -la results/ || true
+          # The verdict is recomputed from every run's own measurements. A result file that says
+          # "pass" is ignored, and a run that produced no result file at all is a failure in the
+          # denominator rather than an absent row.
+          set +e
+          dist/gate3-linux aggregate -results results \
+            -expect-clean '${{ needs.plan.outputs.clean_total }}' \
+            -expect-faults '${{ needs.plan.outputs.fault_list }}' \
+            -summary summary.md
+          rc=$?
+          set -e
+          cat summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          {
+            echo ""
+            echo "Job results: clean \`${{ needs.clean.result }}\`, induced \`${{ needs.faults.result }}\`,"
+            echo "invariant-check self-test \`${{ needs.prove-red.result }}\`."
+            echo ""
+            echo "Firmware-dependent checks — BitLocker suspension, BootNext, ARM itself — are Gate 5,"
+            echo "on physical machines, which is the only place they could ever be honestly tested."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ needs.prove-red.result }}" != success ]; then
+            echo "the invariant check was not shown to fail when it should: its green means nothing"
+            exit 1
+          fi
+          exit $rc
