@@ -456,3 +456,60 @@ func cmdProveRedChild(args []string) error {
 	}
 	return nil
 }
+
+// cmdEnforcementProbe runs inside the installer's Low-integrity session (see
+// gate3.ApplyEnforcement). -dest does what the installer does on a destination:
+// creates its directories itself, creates a run log for append inside them and
+// writes a file below. -source opens every file of the source for read. It
+// prints what it did and exits non-zero on the first thing refused.
+func cmdEnforcementProbe(args []string) error {
+	fs := flag.NewFlagSet("enforcement-probe", flag.ExitOnError)
+	dest := fs.String("dest", "", "a directory to create on a destination, as the installer would")
+	source := fs.String("source", "", "a tree whose every file must open for read")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dest != "" {
+		meta := filepath.Join(*dest, "_auros")
+		deeper := filepath.Join(*dest, "Documents", "Term 2")
+		for _, d := range []string{meta, deeper} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				return err
+			}
+		}
+		f, err := os.OpenFile(filepath.Join(meta, "run-probe.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return err
+		}
+		_, werr := f.WriteString("{}\n")
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			return werr
+		}
+		if err := os.WriteFile(filepath.Join(deeper, "notes.docx.auros-partial"), []byte("x"), 0o644); err != nil {
+			return err
+		}
+		fmt.Println("created directories, a run log and a file")
+	}
+	if *source != "" {
+		n := 0
+		err := filepath.WalkDir(*source, func(p string, d os.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return err
+			}
+			f, oerr := os.Open(p)
+			if oerr != nil {
+				return oerr
+			}
+			n++
+			return f.Close()
+		})
+		if err != nil {
+			return fmt.Errorf("after %d files: %w", n, err)
+		}
+		fmt.Printf("%d files opened for read\n", n)
+	}
+	return nil
+}

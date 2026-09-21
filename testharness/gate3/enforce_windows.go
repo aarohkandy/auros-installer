@@ -72,9 +72,9 @@ func LabelLow(dir string) error {
 // ApplyEnforcement prepares the Low-integrity session the installer runs in and
 // proves it: in that session, creating a directory must be refused at every
 // probe on C: (a broad sample: folders whose DACL would let the account write,
-// and folders with protected DACLs) and must succeed in each Low-labelled
-// destination, and `whoami /groups` must report the Low label. Any miss fails
-// closed. The caller closes the returned session's token.
+// and folders with protected DACLs), `whoami /groups` must report the Low
+// label, and the installer's legitimate work must still be possible (see
+// below). Any miss fails closed. The caller closes the returned session's token.
 //
 // The declared exemption is the account's profile directory, where Windows
 // keeps what a logon needs. At Low only its Low-labelled part (LocalLow) is
@@ -82,7 +82,7 @@ func LabelLow(dir string) error {
 // inside the profile, and is probed: it must be refused too. The installer
 // writes no TEMP or logs on Windows (its run log goes to the destination, its
 // output to the harness's work directory).
-func ApplyEnforcement(s *UserSession, workDir string, lowDirs []string) (*UserSession, *Enforcement) {
+func ApplyEnforcement(s *UserSession, workDir, sourceRoot string, lowDirs []string) (*UserSession, *Enforcement) {
 	e := &Enforcement{
 		Mechanism: "mandatory integrity control: the installer tree runs at Low; only the harness's " +
 			"destination volumes and work directory are labelled Low",
@@ -104,6 +104,25 @@ func ApplyEnforcement(s *UserSession, workDir string, lowDirs []string) (*UserSe
 			return nil, e
 		}
 		e.LabeledLow = append(e.LabeledLow, d)
+	}
+	// The destinations also grant the account itself full control. Run
+	// 35665065458: at Low the installer could create E:\auros-archive\_auros (a
+	// fresh NTFS root lets users add folders) but not a file inside it, and
+	// prove-red, writing where Authenticated Users hold Modify, could. The
+	// likeliest cause (a hypothesis; the write-pattern probe below is what
+	// decides): a new folder's creator is granted access through CREATOR OWNER,
+	// an elevated token's default owner is Administrators, and that grant does
+	// not reach a Low writer. An explicit grant to the account's SID on the
+	// harness's own volumes removes the dependency; it touches nothing on C:.
+	for _, d := range lowDirs {
+		if s.SID == "" {
+			e.Error = "the migration account's SID is unknown"
+			return nil, e
+		}
+		if out, err := exec.Command("icacls", d, "/grant", "*"+s.SID+":(OI)(CI)F").CombinedOutput(); err != nil {
+			e.Error = fmt.Sprintf("icacls %s /grant: %v: %s", d, err, strings.TrimSpace(string(out)))
+			return nil, e
+		}
 	}
 	lowTok, err := LowIntegrityToken(s.Token)
 	if err != nil {
@@ -127,14 +146,53 @@ func ApplyEnforcement(s *UserSession, workDir string, lowDirs []string) (*UserSe
 		{`C:\`, false}, {`C:\ProgramData`, false}, {`C:\Windows\Temp`, false}, {`C:\Program Files`, false},
 		{`C:\Users\Public`, false}, {prof, false}, {filepath.Join(prof, `AppData\Local\Temp`), false},
 	}
-	for _, d := range lowDirs {
-		probes = append(probes, probe{d, true})
-	}
 	for _, p := range probes {
 		created, line := probeMkdir(low, filepath.Join(p.dir, "auros-gate3-enforcement-probe"), workDir)
 		e.Probes = append(e.Probes, line)
 		if created != p.allow {
 			e.Error = "the enforcement did not do what it says: " + line
+			return low, e
+		}
+	}
+
+	// Enforcement must not change what the installer can do legitimately. Run
+	// 35665065458 verified the md probes above and then every clean run lost all
+	// 18,000 files: the installer, at Low, created E:\auros-archive\_auros and
+	// was refused creating its run log inside it. So each destination is probed
+	// with the installer's own pattern — directories it creates itself, then a
+	// file created for append and a file written below them — and the source is
+	// probed by opening every file in it for read. Both run in the Low session,
+	// as gate3.exe itself; any failure fails closed, with the labels and ACLs of
+	// what it created as the evidence.
+	self, err := os.Executable()
+	if err != nil {
+		e.Error = err.Error()
+		return low, e
+	}
+	for _, d := range lowDirs {
+		dir := filepath.Join(d, "auros-gate3-enforcement-probe")
+		os.RemoveAll(dir)
+		said, code := runAs(low, workDir, self, "enforcement-probe", "-dest", dir)
+		line := fmt.Sprintf("the installer's write pattern under %s at Low: exit %d: %s", d, code, strings.TrimSpace(said))
+		if code != 0 {
+			for _, p := range []string{d, dir, filepath.Join(dir, "_auros")} {
+				out, _ := exec.Command("icacls", p).CombinedOutput()
+				line += "\n  icacls " + p + ": " + strings.TrimSpace(string(out))
+			}
+		}
+		os.RemoveAll(dir)
+		e.Probes = append(e.Probes, line)
+		if code != 0 {
+			e.Error = "the enforcement stops the installer writing to its own destination: " + line
+			return low, e
+		}
+	}
+	if sourceRoot != "" {
+		said, code := runAs(low, workDir, self, "enforcement-probe", "-source", sourceRoot)
+		line := fmt.Sprintf("every file under %s opened for read at Low: exit %d: %s", sourceRoot, code, strings.TrimSpace(said))
+		e.Probes = append(e.Probes, line)
+		if code != 0 {
+			e.Error = "the enforcement changes what the installer can READ: " + line
 			return low, e
 		}
 	}
