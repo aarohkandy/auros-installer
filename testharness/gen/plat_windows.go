@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"unsafe"
@@ -25,6 +26,11 @@ var (
 	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
 	procGetVolumeInformationW = kernel32.NewProc("GetVolumeInformationW")
 	procGetVolumePathNameW    = kernel32.NewProc("GetVolumePathNameW")
+	procLocalFree             = kernel32.NewProc("LocalFree")
+
+	advapi32                    = syscall.NewLazyDLL("advapi32.dll")
+	procConvertStringSDToSD     = advapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+	procSetKernelObjectSecurity = advapi32.NewProc("SetKernelObjectSecurity")
 )
 
 func platFaithful() bool { return true }
@@ -167,3 +173,55 @@ func platHoldExclusive(paths []string) (func(), error) {
 
 // referenced so the constant is not dead weight a future reader deletes without reading the comment.
 var _ = fileAttributeRecallOnDataAccess
+
+// platMakeJunction makes a real NTFS junction (IO_REPARSE_TAG_MOUNT_POINT) with mklink /J, the
+// built-in that makes the same object Windows setup made for "Application Data". A symbolic link would
+// be a different reparse tag and would test a different code path.
+func platMakeJunction(link, target string) error {
+	out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mklink /J: %w: %s", err, out)
+	}
+	return nil
+}
+
+// denyListSDDL: Everyone is DENIED FILE_LIST_DIRECTORY (0x1) and allowed everything else, so the
+// directory cannot be enumerated but can still be deleted. The legacy junctions carry the same deny
+// (icacls shows "Everyone:(DENY)(S,RD)"). Protected (P), so nothing is inherited around it.
+const denyListSDDL = "D:P(D;;0x1;;;WD)(A;;FA;;;WD)"
+
+// platDenyList sets denyListSDDL on path ITSELF. The handle is opened with FILE_FLAG_OPEN_REPARSE_POINT,
+// so on a junction it is the junction's ACL that changes and not its target's — denying the target
+// here would make all of LocalAppData unlistable, which no real machine looks like.
+func platDenyList(path string) error {
+	sddl, err := syscall.UTF16PtrFromString(denyListSDDL)
+	if err != nil {
+		return err
+	}
+	var sd uintptr
+	r1, _, e := procConvertStringSDToSD.Call(uintptr(unsafe.Pointer(sddl)), 1, uintptr(unsafe.Pointer(&sd)), 0)
+	if r1 == 0 {
+		return fmt.Errorf("ConvertStringSecurityDescriptorToSecurityDescriptorW: %w", e)
+	}
+	defer procLocalFree.Call(sd)
+
+	p, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	const writeDAC = 0x00040000
+	const fileFlagOpenReparsePoint = 0x00200000
+	h, err := syscall.CreateFile(p, writeDAC,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE, nil,
+		syscall.OPEN_EXISTING, syscall.FILE_FLAG_BACKUP_SEMANTICS|fileFlagOpenReparsePoint, 0)
+	if err != nil {
+		return fmt.Errorf("CreateFile %s: %w", path, err)
+	}
+	defer syscall.CloseHandle(h)
+	const daclSecurityInformation = 0x4
+	r1, _, e = procSetKernelObjectSecurity.Call(uintptr(h), daclSecurityInformation, sd)
+	if r1 == 0 {
+		return fmt.Errorf("SetKernelObjectSecurity %s: %w", path, e)
+	}
+	return nil
+}

@@ -150,6 +150,8 @@ type Result struct {
 	DestRoot string
 	// ResumeRefused says why a requested resume was not used.
 	ResumeRefused string
+	// Links were seen and deliberately not copied: a link is not data.
+	Links []Link
 }
 
 // Describe renders the result for a human, always saying what did NOT happen.
@@ -160,6 +162,12 @@ func (r *Result) Describe() string {
 	fmt.Fprintf(&b, "      %d of %d bytes written to the destination\n", r.BytesCopied, r.BytesPlanned)
 	if r.DestinationFull {
 		b.WriteString("      THE DESTINATION FILLED UP. The remaining files were not copied.\n")
+	}
+	if len(r.Links) > 0 {
+		fmt.Fprintf(&b, "      %d not copied: link, not data\n", len(r.Links))
+		for _, l := range r.Links {
+			fmt.Fprintf(&b, "        %s -> %s\n", l.Path, l.Target)
+		}
 	}
 	if r.Cancelled {
 		b.WriteString("      CANCELLED. Partial files were removed; the manifest lists what is complete.\n")
@@ -243,7 +251,10 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		logEvent(o.Log, "warn", runlog.Fields{"stage": "resume-token", "error": err.Error()})
 	}
 
-	files, err := plan(ctx, o, q)
+	files, err := plan(ctx, o, q, &res.Links)
+	for _, l := range res.Links {
+		logEvent(o.Log, "not-copied", runlog.Fields{"path": l.Path, "target": l.Target, "why": "link, not data"})
+	}
 	if err != nil {
 		res.Quarantined = q.Len()
 		_ = saveManifest(res.Manifest, res.ManifestPath)
@@ -257,6 +268,7 @@ func Run(ctx context.Context, o Options) (*Result, error) {
 		"files":                   res.Planned,
 		"bytes":                   res.BytesPlanned,
 		"quarantined_during_plan": q.Len(),
+		"links_not_copied":        len(res.Links),
 	})
 
 	buf := make([]byte, o.bufSize())

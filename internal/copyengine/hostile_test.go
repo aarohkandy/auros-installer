@@ -385,12 +385,8 @@ func TestCopy_ALinkCycleTerminatesInsteadOfWalkingForever(t *testing.T) {
 	if res.Copied != 1 {
 		t.Errorf("copied = %d, want 1 (only the real file)", res.Copied)
 	}
-	if !inQuarantine(e.q, "Documents/deep/back-to-the-top") {
-		t.Errorf("the cycle was not reported: %+v", e.q.Records())
-	}
-	if e.q.Unresolved() == 0 {
-		t.Error("an unfollowed link must leave an unresolved record, so the run cannot reach the wall")
-	}
+	// This is LocalAppData\Application Data: a junction back to its own parent.
+	assertLinkReported(t, e, res, "Documents/deep/back-to-the-top", e.src)
 	assertSourceUnchanged(t, e, srcBefore)
 	e.assertSystemDiskUntouched(t)
 }

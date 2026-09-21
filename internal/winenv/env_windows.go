@@ -294,6 +294,31 @@ func (w *winEnv) IsReparsePoint(path string) (bool, error) {
 	return attrs&attrReparsePoint != 0, nil
 }
 
+// ReparseTag returns the reparse tag of path ITSELF, or 0 if it is not a
+// reparse point.
+//
+// FindFirstFileW is asked about the name, which reads the PARENT directory's
+// listing: a junction whose own ACL denies listing (LocalAppData\Application
+// Data denies Everyone) still answers. WIN32_FIND_DATAW.dwReserved0 "specifies
+// the reparse point tag" when FILE_ATTRIBUTE_REPARSE_POINT is set.
+// https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw
+func ReparseTag(path string) (uint32, error) {
+	p, err := syscall.UTF16PtrFromString(longPath(path))
+	if err != nil {
+		return 0, err
+	}
+	var fd syscall.Win32finddata
+	h, err := syscall.FindFirstFile(p, &fd)
+	if err != nil {
+		return 0, err
+	}
+	syscall.FindClose(h)
+	if fd.FileAttributes&attrReparsePoint == 0 {
+		return 0, nil
+	}
+	return fd.Reserved0, nil
+}
+
 func (w *winEnv) Firmware() (Firmware, error) {
 	// Deliberately incomplete and deliberately honest.
 	//
