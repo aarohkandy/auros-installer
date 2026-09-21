@@ -194,6 +194,13 @@ func (s *SystemDiskReport) OK() bool {
 	return s != nil && s.Error == "" && !s.Wrapped && len(s.Unexplained) == 0 && s.Records >= 0
 }
 
+// ReaderMissedRecords reports a window in which the journal advanced and the
+// reader returned nothing: the journal is not being read. A window in which the
+// journal did NOT advance is a quiet machine, and zero records is the truth.
+func (s *SystemDiskReport) ReaderMissedRecords() bool {
+	return s.Records == 0 && s.EndUSN > s.StartUSN
+}
+
 // RequiredChecks is the list of check IDs a run of this shape owes. A result
 // that does not contain every one of them is a failed run: a checks array that
 // simply omits C1 is otherwise indistinguishable from one where C1 passed.

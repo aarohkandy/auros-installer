@@ -378,6 +378,9 @@ func WarmProfile(s *UserSession, workDir, corpusRoot string) (map[string]string,
 // quiesceServices are stopped and disabled before any measurement.
 var quiesceServices = []string{
 	"wuauserv", // Windows Update
+	// Windows Modules Installer: hosts TiWorker, which wrote C:\Windows\CbsTemp
+	// during a clean run with wuauserv already stopped (run 35562498238).
+	"TrustedInstaller",
 	"UsoSvc",   // the update orchestrator
 	"DoSvc",    // delivery optimisation
 	"gupdate",  // Google's updater

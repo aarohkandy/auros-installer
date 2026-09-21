@@ -375,9 +375,13 @@ func cmdProveRed(args []string) error {
 			"journal %d, USN %d..%d)%s",
 			rep.Records, len(rep.Unexplained), rep.JournalID, rep.StartUSN, rep.EndUSN, errSuffix(rep))
 	}
-	if quietRep.Records == 0 {
-		return fmt.Errorf("the idle window saw no change-journal records at all, which means the journal " +
-			"is not being read: a check that sees nothing passes everything")
+	// A quiet window with zero records is only suspicious if the journal moved.
+	// Run 35562498238 measured a truly idle two seconds (USN start == end) and
+	// failed here; the probe in step 2 is what proves the reader works.
+	if quietRep.ReaderMissedRecords() {
+		return fmt.Errorf("the journal advanced from USN %d to %d during the idle window and the reader "+
+			"returned no records: the journal is not being read, and a check that sees nothing passes "+
+			"everything", quietRep.StartUSN, quietRep.EndUSN)
 	}
 	fmt.Println("the system-disk check goes red when the system disk is written to, and green when it is not")
 	return nil

@@ -80,6 +80,15 @@ var noiseRules = []NoiseRule{
 	{Pattern: `^c:\\windows\\system32\\smi\\store\\`, Why: "the component store's database, written by servicing"},
 	{Pattern: `^c:\\windows\\apppatch\\`, Why: "the application-compatibility database"},
 	{Pattern: `^c:\\windows\\systemtemp\\`, Why: "the temp directory Windows' own services use"},
+	// Measured on windows-2025, run 35562498238 clean-0-1, with wuauserv and
+	// UsoSvc already stopped: 86 records, all from one servicing-stack scan.
+	// Each rule is the exact shape measured, not the directory.
+	{Pattern: `^c:\\windows\\cbstemp\\([0-9]+_[0-9]+(\\localfodenum(\\(actionlist|deviceinventory|servertargetcompdb_[a-z0-9_-]+)\.xml)?)?|\{[0-9a-f-]{36}\})$`,
+		Why: "Component-Based Servicing (TiWorker.exe, the TrustedInstaller service) enumerating Features " +
+			"on Demand into a session folder and deleting it again. Only the session folder, its " +
+			"LocalFoDEnum subfolder, the XML files CBS names there and CBS's {GUID} rename target match"},
+	{Pattern: `^c:\\windows\\windowsupdate\.log$`,
+		Why: "the Windows Update agent's legacy log file, written by the same scan"},
 	{Pattern: `^c:\\windows\\system32\\tasks\\microsoft\\windows\\`,
 		Why: "the last-run bookkeeping of WINDOWS' OWN scheduled tasks. Narrowed to Microsoft\\Windows: a " +
 			"task installed anywhere else — which is what a tool that wanted to survive a reboot would " +

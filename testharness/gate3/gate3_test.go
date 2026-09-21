@@ -573,6 +573,10 @@ func TestNoiseListNeverExcusesAnywhereTheInstallerMightWrite(t *testing.T) {
 		`C:\Users\runneradmin\Documents\notes.txt`,
 		`C:\boot.ini`,
 		`C:\Windows\Boot\EFI\bootmgfw.efi`,
+		`C:\Windows\CbsTemp\auros-migrate.exe`,
+		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum\payload.dll`,
+		`C:\Windows\CbsTemp\31279493_2394330146\scratch\ActionList.xml`,
+		`C:\Windows\WindowsUpdate.log.auros`,
 	}
 	for _, p := range mustNotBeNoise {
 		if ok, rule := IsNoise(p); ok {
@@ -586,6 +590,17 @@ func TestNoiseListNeverExcusesAnywhereTheInstallerMightWrite(t *testing.T) {
 		`C:\Users\auros-gate3\ntuser.dat.LOG1`,
 		`C:\actions-runner\_diag\Worker_20260921.log`,
 		`C:\pagefile.sys`,
+		// Measured on windows-2025 run 35562498238, clean-0-1: a servicing-stack
+		// Features-on-Demand enumeration with Windows Update's services stopped.
+		`C:\Windows\CbsTemp\31279493_2394330146`,
+		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum`,
+		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum\ActionList.xml`,
+		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum\DeviceInventory.xml`,
+		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum\ServerTargetCompDB_Conditions.xml`,
+		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum\ServerTargetCompDB_FOD_sr-latn-rs.xml`,
+		`C:\Windows\CbsTemp\31279493_2394330146\LocalFoDEnum\ServerTargetCompDB_zh-tw.xml`,
+		`C:\Windows\CbsTemp\{24C2F83F-4420-40C0-B8D7-2A677196947D}`,
+		`C:\Windows\WindowsUpdate.log`,
 	}
 	for _, p := range mustBeNoise {
 		if ok, _ := IsNoise(p); !ok {
@@ -613,5 +628,24 @@ func TestInventoryLinesReadTheFoldersTheInstallerSaysItLookedAt(t *testing.T) {
 	}
 	if len(inv) != 3 {
 		t.Fatalf("expected three folders, got %d: %v", len(inv), inv)
+	}
+}
+
+// ── prove-red's idle window ──────────────────────────────────────────────────
+
+func TestIdleWindowIsOnlyABrokenReaderWhenTheJournalMoved(t *testing.T) {
+	// Measured on run 35562498238: a genuinely quiet two seconds, USN start ==
+	// end, zero records. That is a quiet machine, not a broken reader.
+	quiet := &SystemDiskReport{StartUSN: 3534445720, EndUSN: 3534445720}
+	if quiet.ReaderMissedRecords() {
+		t.Error("a window in which the journal did not advance was called a broken reader")
+	}
+	moved := &SystemDiskReport{StartUSN: 100, EndUSN: 4096}
+	if !moved.ReaderMissedRecords() {
+		t.Error("the journal advanced and the reader returned nothing, and that was not flagged")
+	}
+	read := &SystemDiskReport{StartUSN: 100, EndUSN: 4096, Records: 3}
+	if read.ReaderMissedRecords() {
+		t.Error("a window whose records were read was called a broken reader")
 	}
 }
