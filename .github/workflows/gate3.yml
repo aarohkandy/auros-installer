@@ -39,7 +39,9 @@ on:
   schedule:
     - cron: '0 3 * * *'
   push:
-    paths: ['internal/**', 'cmd/**', 'testharness/**', '.github/workflows/gate3.yml']
+    # A suite of this size must not be started by a documentation edit, so the
+    # markdown under testharness/ is excluded by a negative pattern.
+    paths: ['internal/**', 'cmd/**', 'testharness/**', '.github/workflows/gate3.yml', '!**/*.md']
 
 # The shape of a push-triggered run. Spec §6C is 100 clean runs; these are the numbers a run started by
 # a commit uses, and they are edited in a commit — visibly — when the full suite is wanted.
@@ -175,7 +177,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the §4.7 guard refused this machine" }
       - name: Generate 18,000 synthetic files and the golden manifest
         run: |
-          .\dist\gen.exe generate -seed ${{ 20260921 + matrix.shard }} -root $env:CORPUS_ROOT `
+          .\dist\gen.exe generate -seed 202609${{ matrix.shard }} -root $env:CORPUS_ROOT `
             -token $env:WORK_ROOT\token.json -manifest-dir $env:WORK_ROOT `
             -profile ${{ needs.plan.outputs.profile }} -count 18000
           if ($LASTEXITCODE -ne 0) { throw "the corpus was not generated" }
@@ -193,7 +195,7 @@ jobs:
             .\dist\gate3.exe run -run-id $id -golden $env:WORK_ROOT\golden-manifest.jsonl `
               -corpus $env:CORPUS_ROOT -tool (Resolve-Path .\dist\auros-migrate-amd64.exe) `
               -dest-volume E:\ -work $env:WORK_ROOT\work -password-file $env:WORK_ROOT\pw.txt `
-              -profile ${{ needs.plan.outputs.profile }} -seed ${{ 20260921 + matrix.shard }} `
+              -profile ${{ needs.plan.outputs.profile }} -seed 202609${{ matrix.shard }} `
               -out $env:WORK_ROOT\results\$id.json
             if ($LASTEXITCODE -ne 0) { $failures += $id }
           }
