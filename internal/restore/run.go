@@ -245,12 +245,15 @@ func Execute(ctx context.Context, p *Plan, o Options) (*Summary, error) {
 		Manifest: p.Archive.Manifest,
 		BufSize:  bufSize,
 	})
-	s.PreVerify = pre
 	if err != nil {
+		// The partial report is NOT attached: its counts are of a check that
+		// did not finish, and the report would print them as facts ("the
+		// drive holds 0").
 		s.FinishedAt = now()
 		s.StoppedEarly = "could not read the archive: " + err.Error()
 		return s, fmt.Errorf("restore: verifying the archive: %w", err)
 	}
+	s.PreVerify = pre
 	if !pre.Clean() {
 		s.FinishedAt = now()
 		s.StoppedEarly = "the archive did not verify; nothing was written"

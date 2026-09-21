@@ -91,7 +91,13 @@ type Report struct {
 	// Thumbs.db, desktop.ini, a Mac's ._ files, a Linux desktop's .Trash-1000.
 	// Each is NAMED here and in Describe, and is not a disagreement. See
 	// isLitter for the list and for why it cannot hide a real file.
-	Litter     []string
+	Litter []string
+	// Unopened is every directory at the destination that could not be
+	// listed and that no manifest entry is inside — ext4's root-owned
+	// lost+found, to the user the restore runs as. Named, not counted: it
+	// cannot hold a file the manifest describes. A directory that DOES hold
+	// manifest entries and cannot be listed is a Disagreement instead.
+	Unopened   []string
 	StartedAt  time.Time
 	FinishedAt time.Time
 }
@@ -135,6 +141,9 @@ func (r *Report) Describe() string {
 		for _, l := range r.Litter {
 			fmt.Fprintf(&b, "          %s\n", l)
 		}
+	}
+	for _, u := range r.Unopened {
+		fmt.Fprintf(&b, "        %s could not be opened; no file in the manifest is inside it\n", u)
 	}
 	if r.Clean() {
 		b.WriteString("        every file matched by count, size and SHA-256.\n")
@@ -210,7 +219,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	entries := o.Manifest.Entries()
 	rep.ManifestCount = len(entries)
 
-	found, err := scanDestination(ctx, o.DestRoot, meta)
+	found, unlisted, err := scanDestination(ctx, o.DestRoot, meta)
 	if err != nil {
 		return rep, err
 	}
@@ -231,6 +240,11 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 			rep.Retried++
 		}
 		rep.Checked++
+		if d == nil && !found[e.Stored] {
+			// Verified by size and hash, so it IS at the destination; the scan
+			// did not see it because its directory could not be listed.
+			rep.DestinationCount++
+		}
 		delete(found, e.Stored)
 		if d != nil {
 			d.Retried = retried
@@ -267,6 +281,28 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	for _, stored := range extras {
 		extra := manifest.Entry{Path: stored, Stored: stored}
 		d := *disagree(extra, KindExtra, "not present", "present at destination")
+		rep.Disagreements = append(rep.Disagreements, d)
+		recordQuarantine(o.Quarantine, d)
+	}
+
+	// A directory that could not be listed matters only if the manifest has
+	// files inside it: then what else is in there cannot be known, and the
+	// directory is named as a disagreement. Otherwise it is named and ignored,
+	// because only manifest-listed paths are ever read or restored.
+	for _, dir := range unlisted {
+		n := 0
+		for _, e := range entries {
+			if strings.HasPrefix(e.Stored, dir+"/") {
+				n++
+			}
+		}
+		if n == 0 {
+			rep.Unopened = append(rep.Unopened, dir)
+			continue
+		}
+		d := Disagreement{Path: dir + "/", Stored: dir, Kind: KindUnreadable,
+			Want: fmt.Sprintf("a folder holding %d of the backup's files", n),
+			Got:  "a folder that cannot be opened"}
 		rep.Disagreements = append(rep.Disagreements, d)
 		recordQuarantine(o.Quarantine, d)
 	}
@@ -408,10 +444,21 @@ func checkOnce(ctx context.Context, full string, e manifest.Entry, h hash.Hash, 
 // relative path, excluding the metadata directory. The count it produces is the
 // count compared against the manifest, which is how "all the hashes are fine but
 // there are 99 files where there should be 100" is caught.
-func scanDestination(ctx context.Context, root, meta string) (map[string]bool, error) {
-	out := make(map[string]bool)
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+//
+// A directory below root that cannot be listed does not stop the scan: it is
+// returned in unlisted and Run decides whether it matters. The first version
+// returned the error, which aborted a restore over ext4's lost+found and
+// reported the drive as holding 0 files.
+func scanDestination(ctx context.Context, root, meta string) (out map[string]bool, unlisted []string, err error) {
+	out = make(map[string]bool)
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if p != root && d != nil && d.IsDir() {
+				if rel, rerr := filepath.Rel(root, p); rerr == nil {
+					unlisted = append(unlisted, filepath.ToSlash(rel))
+					return fs.SkipDir
+				}
+			}
 			return err
 		}
 		if cerr := ctx.Err(); cerr != nil {
@@ -438,7 +485,7 @@ func scanDestination(ctx context.Context, root, meta string) (map[string]bool, e
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("verify: scanning destination: %w", err)
+		return nil, nil, fmt.Errorf("verify: scanning destination: %w", err)
 	}
-	return out, nil
+	return out, unlisted, nil
 }

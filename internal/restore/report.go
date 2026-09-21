@@ -363,6 +363,12 @@ func RenderReport(s *Summary, l *Layout) string {
 	if s.ReportFilePath != "" {
 		w("  this note          %s", s.ReportFilePath)
 	}
+	if s.PreVerify != nil {
+		for _, u := range s.PreVerify.Unopened {
+			w("  not opened         %s, a folder on the backup drive this program is", u)
+			w("                     not allowed to read. None of your files are in it.")
+		}
+	}
 	if n := len(s.PartialsSwept); n > 0 {
 		w("  tidied up          %s left half-written by an earlier run that was", plural(n, "file", "files"))
 		w("                     interrupted, and removed before anything was copied:")
@@ -433,6 +439,9 @@ func problems(s *Summary) []string {
 			continue
 		}
 		out = append(out, h.Problems...)
+	}
+	if len(out) == 0 && s.StoppedEarly != "" {
+		out = append(out, "the run stopped before it could finish; what stopped it is above")
 	}
 	if len(out) == 0 {
 		out = append(out, "the run did not finish cleanly and this program cannot say why, "+

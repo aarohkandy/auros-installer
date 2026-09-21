@@ -339,6 +339,48 @@ m27d() {
     '	lb.None = false'
 }
 
+# ── M28 ───────────────────────────────────────────────────────────────────
+# FATAL, and real (found running the real binary on an ext4 stick): the scan
+# stops on any unreadable directory, so root-owned lost+found aborts the
+# restore and the report says the drive holds 0 files.
+m28() {
+  mutate "$1/internal/verify/verify.go" \
+    '			if p != root && d != nil && d.IsDir() {' \
+    '			if false && p != root && d != nil && d.IsDir() {'
+}
+
+# ── M28b ──────────────────────────────────────────────────────────────────
+# An unlistable folder that holds the backup's own files is waved through as
+# if it were lost+found.
+m28b() {
+  mutate "$1/internal/verify/verify.go" \
+    '		if n == 0 {
+			rep.Unopened = append(rep.Unopened, dir)' \
+    '		if true {
+			rep.Unopened = append(rep.Unopened, dir)'
+}
+
+# ── M28c ──────────────────────────────────────────────────────────────────
+# The unfinished check's report is attached again, and its zeroes are printed
+# as a count of what is on the drive.
+m28c() {
+  mutate "$1/internal/restore/run.go" \
+    '	if err != nil {
+		// The partial report is NOT attached' \
+    '	s.PreVerify = pre
+	if err != nil {
+		// The partial report is NOT attached'
+}
+
+# ── M28d ──────────────────────────────────────────────────────────────────
+# A file that verified but sat in an unlistable folder stops being counted, so
+# the report says the drive holds fewer files than it does.
+m28d() {
+  mutate "$1/internal/verify/verify.go" \
+    '		if d == nil && !found[e.Stored] {' \
+    '		if false && d == nil && !found[e.Stored] {'
+}
+
 # ── M14 ───────────────────────────────────────────────────────────────────
 # FATAL, and real: the finder stops looking one level down. The Windows half
 # writes <mount>/auros-backup/_auros/manifest.tsv; the first version of the
@@ -659,6 +701,19 @@ run_case M27c "the left-behind list is read through a link" \
 run_case M27d "an empty left-behind list reads as files left behind" \
   ./internal/restore 'TestReport_TheCleanBranchTellsTheUserToKeepTheStick' \
   'was reported as files left behind' m27d
+
+run_case M28 "an unreadable lost+found aborts the restore (FATAL)" \
+  ./internal/restore 'TestExecute_AnUnreadableFolderBesideTheArchiveDoesNotStopTheRestore' \
+  'stopped the restore' m28
+run_case M28b "an unlistable backup folder is waved through" \
+  ./internal/restore 'TestExecute_ABackupFolderThatCannotBeListedIsNamedEvenIfItsFilesRead' \
+  'treated as outside the backup' m28b
+run_case M28c "an unfinished check is printed as a count" \
+  ./internal/restore 'TestExecute_ACheckThatCouldNotFinishPrintsNoCounts' \
+  'FALSE STATEMENT' m28c
+run_case M28d "files in an unlistable folder stop being counted" \
+  ./internal/restore 'TestExecute_ABackupFolderThatCannotBeListedIsNamedEvenIfItsFilesRead' \
+  'the report says the count is short' m28d
 
 echo
 echo "prove-red: $PASS caught, $FAIL not caught."
