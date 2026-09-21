@@ -22,3 +22,7 @@ func platSetOffline(path string) error { return errNotSupported }
 func platWriteStream(path, stream string, data []byte) error { return errNotSupported }
 
 func platHoldExclusive(paths []string) (func(), error) { return func() {}, errNotSupported }
+
+func platMakeJunction(link, target string) error { return errNotSupported }
+
+func platDenyList(path string) error { return errNotSupported }
