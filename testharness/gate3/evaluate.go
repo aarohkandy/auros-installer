@@ -54,7 +54,7 @@ func (r *Result) Evaluate(sc *Scenario, expectedFiles int) {
 				"DATA LOSS OR DAMAGE IN THE SOURCE: %d lost, %d corrupted, %d unreadable, %d unexpected new files, "+
 					"%d deliberate deviations not in the state the harness left them in%s",
 				len(s.Missing), len(s.Corrupt), len(s.Unreadable), len(s.Extra), len(s.DeviationsLost),
-				firstOf(s.Missing, s.Corrupt, s.Extra))
+				firstOf(s.Missing, s.Extra)+firstProblem(s.Corrupt))
 		}
 	}
 

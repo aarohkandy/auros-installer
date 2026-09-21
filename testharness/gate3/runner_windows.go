@@ -55,7 +55,7 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	res := &Result{
 		Harness: HarnessVersion, RunID: cfg.RunID, Kind: KindClean,
 		CorpusRoot: cfg.CorpusRoot, ToolPath: cfg.Tool,
-		Profile: cfg.Profile, Seed: cfg.Seed, Faithful: cfg.Faithful,
+		Profile: cfg.Profile, CorpusSeed: cfg.Seed, Faithful: cfg.Faithful,
 		Image: cfg.Image, Hosted: os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted",
 	}
 	res.Machine, _ = os.Hostname()
