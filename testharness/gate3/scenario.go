@@ -182,6 +182,10 @@ type Scenario struct {
 	// corpus that points outside it, before the run.
 	PlantSymlinkEscape bool
 
+	// PlantDeniedDir asks the harness to put a LocalAppData folder nobody can
+	// list into the corpus, before the run.
+	PlantDeniedDir bool
+
 	// CloudFiles is the --cloud-files choice this run makes. Empty means
 	// hydrate, which is what every other run uses.
 	CloudFiles string
@@ -198,7 +202,7 @@ type Scenario struct {
 	WrongReason string
 }
 
-// Suite is the induced-failure half of Gate 3: 23 runs that must abort or
+// Suite is the induced-failure half of Gate 3: 24 runs that must abort or
 // refuse, and 4 that must survive.
 //
 // Spec §6C asks for 20 aborts. There are 23 here because three cases the spec
@@ -463,6 +467,20 @@ func Suite() []Scenario {
 			WrongReason: "Following it 'because it resolves' is the failure. Quarantining it and then " +
 				"proceeding to the wall anyway is the other one: an unresolved quarantine entry must " +
 				"stop the run.",
+		},
+
+		{
+			ID: "G05", Family: "appdata_hazard", Name: "A LocalAppData folder the user cannot list",
+			Dest: DestNormal, Trigger: TriggerNone, Action: ActionNone, PlantDeniedDir: true,
+			Expect:        ExpectAbort,
+			AbortEvidence: []string{"read-error", "Access is denied"},
+			Why: "SYSTEM-REVIEW §2.20: some real profiles carry a folder the user cannot read. Until " +
+				"docs/APPDATA-SCOPE.md decides otherwise, the only honest outcome is to name it in the " +
+				"quarantine and stop before the wall. It is a scenario of its own so that the clean runs " +
+				"measure a clean machine instead of stopping here every time.",
+			WrongReason: "Skipping the folder and issuing a verified archive is the failure: the user " +
+				"is never told something was left behind. If APPDATA-SCOPE decides such folders are " +
+				"out of scope, this expectation changes to survive-and-report, not disappears.",
 		},
 
 		// ── the installer must SURVIVE these ─────────────────────────────────

@@ -390,3 +390,33 @@ func (g *Golden) StreamFiles() (files int, streams int) {
 	}
 	return files, streams
 }
+
+// GeneratorJunctions reads the junctions gen made in the corpus from the
+// corpus-plan.json it wrote next to the golden manifest, as corpus-relative
+// slash paths. They are not files, so they are not in the manifest; without
+// this list the source check reads them as links that appeared during the run.
+// A plan without junctions (an older gen) is not an error: there are none.
+func GeneratorJunctions(planPath, corpusRoot string) ([]string, error) {
+	b, err := os.ReadFile(planPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var p struct {
+		Junctions []string `json:"junctions"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return nil, fmt.Errorf("gate3: %s: %w", planPath, err)
+	}
+	prefix := strings.ToLower(strings.TrimRight(corpusRoot, `\/`) + `\`)
+	var out []string
+	for _, j := range p.Junctions {
+		if !strings.HasPrefix(strings.ToLower(j), prefix) {
+			return nil, fmt.Errorf("gate3: the plan names a junction outside the corpus: %s", j)
+		}
+		out = append(out, strings.ReplaceAll(j[len(prefix):], `\`, "/"))
+	}
+	return out, nil
+}

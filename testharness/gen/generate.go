@@ -189,11 +189,10 @@ type Plan struct {
 	LongPathFiles  int      `json:"long_path_files"`
 	NearMaxPath    int      `json:"near_max_path_files"`
 
-	// Junctions and DenyACLDirs are the LocalAppData hazards (see localAppDataLinks). They are not
-	// in the golden manifest — they are not data — so they are listed here, where a runner can
-	// assert the installer met them.
-	Junctions   []string `json:"junctions"`
-	DenyACLDirs []string `json:"deny_acl_dirs"`
+	// Junctions are the LocalAppData legacy junctions (see localAppDataLinks). They are not in the
+	// golden manifest — they are not data — so they are listed here, where the runner learns they
+	// belong to the corpus and are not something that appeared in it during a run.
+	Junctions []string `json:"junctions"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -203,8 +202,7 @@ type Plan struct {
 // denies Everyone the right to list them, and "Application Data" points back at LocalAppData itself.
 // A corpus without them cannot see what a copy engine does with a reparse point, which is the one
 // thing that decides whether a run on a real machine can finish. So they are made for real — actual
-// IO_REPARSE_TAG_MOUNT_POINT junctions, actual deny ACEs — and so is one plain directory the user
-// cannot list, which a copy engine must stop on rather than skip.
+// IO_REPARSE_TAG_MOUNT_POINT junctions, actual deny ACEs.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 var localAppDataLinks = []struct{ link, target string }{
@@ -213,12 +211,12 @@ var localAppDataLinks = []struct{ link, target string }{
 	{"AppData/Local/Temporary Internet Files", "AppData/Local/Microsoft/Windows/INetCache"},
 }
 
-// localAppDataDenied is honest about being synthetic: there is no one folder every real profile has
-// that the user cannot read, only the certainty that some machines have one.
-const localAppDataDenied = "AppData/Local/auros-deny-acl-fixture"
+// The folder the user cannot list is NOT made here. Every copy engine that meets one must stop
+// (docs/APPDATA-SCOPE.md), so putting it in the shared corpus made every clean run stop on it and
+// hid whatever else those runs would have shown. The harness plants it for scenario G05 only.
 
-// writeLocalAppDataHazards runs after every file is written: a deny ACE placed first would stop the
-// generator writing the corpus underneath it.
+// writeLocalAppDataHazards runs after every file is written, so the junctions' deny ACEs cannot get
+// in the way of writing the corpus.
 func writeLocalAppDataHazards(winRoot string, faithful *bool) error {
 	for _, l := range localAppDataLinks {
 		target := localPath(winRoot, l.target)
@@ -236,13 +234,6 @@ func writeLocalAppDataHazards(winRoot string, faithful *bool) error {
 		if err := platDenyList(link); err != nil {
 			return fmt.Errorf("deny ACL on junction %s: %w", link, err)
 		}
-	}
-	denied := localPath(winRoot, localAppDataDenied)
-	if err := os.MkdirAll(denied, 0o755); err != nil {
-		return err
-	}
-	if err := platDenyList(denied); err != nil {
-		return fmt.Errorf("deny ACL on %s: %w", denied, err)
 	}
 	return nil
 }
@@ -621,7 +612,6 @@ func cmdGenerate(args []string) error {
 	for _, l := range localAppDataLinks {
 		p.Junctions = append(p.Junctions, winPath(*root, l.link))
 	}
-	p.DenyACLDirs = []string{winPath(*root, localAppDataDenied)}
 	for i := range recs {
 		if recs[i].LockedAtRuntime {
 			p.LockedFiles = append(p.LockedFiles, recs[i].WinPath)

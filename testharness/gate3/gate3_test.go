@@ -649,3 +649,25 @@ func TestIdleWindowIsOnlyABrokenReaderWhenTheJournalMoved(t *testing.T) {
 		t.Error("a window whose records were read was called a broken reader")
 	}
 }
+
+// gen's junctions belong to the corpus; the runner learns them from the plan, as
+// corpus-relative paths the source walk can match.
+func TestGeneratorJunctionsComeFromThePlan(t *testing.T) {
+	plan := filepath.Join(t.TempDir(), "corpus-plan.json")
+	if err := os.WriteFile(plan, []byte(`{"junctions":["C:\\gate3\\corpus\\AppData\\Local\\Application Data","c:\\GATE3\\corpus\\AppData\\Local\\History"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GeneratorJunctions(plan, `C:\gate3\corpus`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, "|") != "AppData/Local/Application Data|AppData/Local/History" {
+		t.Errorf("got %q", got)
+	}
+	if got, err := GeneratorJunctions(plan+".missing", `C:\gate3\corpus`); err != nil || got != nil {
+		t.Errorf("a missing plan is no junctions, got %q, %v", got, err)
+	}
+	if _, err := GeneratorJunctions(plan, `C:\elsewhere`); err == nil {
+		t.Error("a junction outside the corpus must be refused")
+	}
+}

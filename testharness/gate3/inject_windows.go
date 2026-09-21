@@ -484,3 +484,36 @@ func deterministicOffset(scenarioID, path string, size int64) (int64, uint) {
 	}
 	return int64(a % uint64(size)), uint(b % 8)
 }
+
+// denyListSDDL: Everyone is DENIED FILE_LIST_DIRECTORY and allowed everything
+// else, so the directory cannot be enumerated but can still be removed. Protected
+// (P), so nothing is inherited around it. The same ACE gen puts on its junctions.
+const denyListSDDL = "D:P(D;;0x1;;;WD)(A;;FA;;;WD)"
+
+var (
+	procConvertStringSDToSD = syscall.NewLazyDLL("advapi32.dll").NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+	procSetFileSecurityW    = syscall.NewLazyDLL("advapi32.dll").NewProc("SetFileSecurityW")
+	procLocalFreeSD         = syscall.NewLazyDLL("kernel32.dll").NewProc("LocalFree")
+)
+
+// DenyList makes dir a folder nobody can list.
+func DenyList(dir string) error {
+	sddl, err := syscall.UTF16PtrFromString(denyListSDDL)
+	if err != nil {
+		return err
+	}
+	var sd uintptr
+	if r, _, e := procConvertStringSDToSD.Call(uintptr(unsafe.Pointer(sddl)), 1, uintptr(unsafe.Pointer(&sd)), 0); r == 0 {
+		return fmt.Errorf("ConvertStringSecurityDescriptorToSecurityDescriptorW: %w", e)
+	}
+	defer procLocalFreeSD.Call(sd)
+	p, err := syscall.UTF16PtrFromString(dir)
+	if err != nil {
+		return err
+	}
+	const daclSecurityInformation = 0x4
+	if r, _, e := procSetFileSecurityW.Call(uintptr(unsafe.Pointer(p)), daclSecurityInformation, sd); r == 0 {
+		return fmt.Errorf("SetFileSecurityW %s: %w", dir, e)
+	}
+	return nil
+}

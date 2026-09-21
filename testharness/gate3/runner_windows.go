@@ -117,6 +117,31 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 		})
 	}
 
+	// gen's LocalAppData junctions are part of the corpus, not something that
+	// appeared in it: recorded here so the source walk does not report them as
+	// new, and re-checked after the run so one the installer removed is data loss.
+	junctions, jerr := GeneratorJunctions(filepath.Join(filepath.Dir(cfg.GoldenPath), "corpus-plan.json"), cfg.CorpusRoot)
+	if jerr != nil {
+		return nil, jerr
+	}
+	for _, j := range junctions {
+		devs = append(devs, Deviation{Tree: "source", Path: j, Kind: "junction made by gen"})
+	}
+
+	// A LocalAppData folder nobody can list. Its own scenario, not the shared
+	// corpus: until docs/APPDATA-SCOPE.md is decided every run that meets one
+	// stops, and a clean run that always stops measures nothing else.
+	if sc != nil && sc.PlantDeniedDir {
+		dir := filepath.Join(cfg.CorpusRoot, "AppData", "Local", "auros-deny-acl-fixture")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+		if err := DenyList(dir); err != nil {
+			return nil, fmt.Errorf("gate3: planting the unlistable folder: %w", err)
+		}
+		defer os.Remove(dir)
+	}
+
 	// ── the pin ──────────────────────────────────────────────────────────────
 	var pin Pin
 	if sc != nil && sc.Trigger != TriggerNone {
@@ -217,6 +242,12 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	src, serr := CheckSource(g, cfg.CorpusRoot, devs)
 	if serr != nil && src == nil {
 		return nil, serr
+	}
+	for _, j := range junctions {
+		if st, err := os.Lstat(filepath.Join(cfg.CorpusRoot, filepath.FromSlash(j))); err != nil || st.Mode().IsRegular() || st.IsDir() {
+			src.DeviationsLost = append(src.DeviationsLost, Problem{Path: j, Kind: "junction-gone",
+				Detail: "gen made this a junction and after the run it is not one"})
+		}
 	}
 	res.Source = src
 
