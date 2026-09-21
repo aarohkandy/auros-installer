@@ -32,12 +32,20 @@ var (
 // its caller needs SeImpersonatePrivilege, which the elevated runner account
 // holds). The caller closes it.
 func LowIntegrityToken(tok syscall.Handle) (syscall.Handle, error) {
+	return IntegrityToken(tok, LowIntegritySID)
+}
+
+// MediumIntegritySID is SECURITY_MANDATORY_MEDIUM_RID (0x2000).
+const MediumIntegritySID = "S-1-16-8192"
+
+// IntegrityToken is LowIntegrityToken for any mandatory level.
+func IntegrityToken(tok syscall.Handle, level string) (syscall.Handle, error) {
 	var dup syscall.Handle
 	if r, _, e := procDuplicateTokenEx.Call(uintptr(tok), tokenAllAccess, 0, securityImpersonation,
 		tokenPrimary, uintptr(unsafe.Pointer(&dup))); r == 0 {
 		return 0, fmt.Errorf("DuplicateTokenEx: %w", e)
 	}
-	sid, err := syscall.StringToSid(LowIntegritySID)
+	sid, err := syscall.StringToSid(level)
 	if err != nil {
 		syscall.CloseHandle(dup)
 		return 0, err
@@ -171,17 +179,20 @@ func ApplyEnforcement(s *UserSession, workDir, sourceRoot string, lowDirs []stri
 	}
 	for _, d := range lowDirs {
 		dir := filepath.Join(d, "auros-gate3-enforcement-probe")
+		// A directory the harness (High) makes, next to the ones the Low
+		// process makes itself, so the raw CreateFileW probes compare the two.
+		made := filepath.Join(d, "auros-gate3-harness-made")
 		os.RemoveAll(dir)
-		said, code := runAs(low, workDir, self, "enforcement-probe", "-dest", dir)
+		os.RemoveAll(made)
+		os.MkdirAll(made, 0o755)
+		started := time.Now()
+		said, code := runAs(low, workDir, self, "enforcement-probe", "-dest", dir, "-harness-dir", made)
 		line := fmt.Sprintf("the installer's write pattern under %s at Low: exit %d: %s", d, code, strings.TrimSpace(said))
 		if code != 0 {
-			// icacls prints the mandatory label with the DACL; the files too.
-			for _, p := range []string{d, dir, filepath.Join(dir, "_auros"), filepath.Join(dir, "_auros", "*")} {
-				out, _ := exec.Command("icacls", p).CombinedOutput()
-				line += "\n  icacls " + p + ": " + strings.TrimSpace(string(out))
-			}
+			e.Diagnostics = append(e.Diagnostics, diagnoseDestination(s, workDir, self, d, dir, made, started)...)
 		}
 		os.RemoveAll(dir)
+		os.RemoveAll(made)
 		e.Probes = append(e.Probes, line)
 		if code != 0 {
 			e.Error = "the enforcement stops the installer writing to its own destination: " + line
@@ -199,6 +210,48 @@ func ApplyEnforcement(s *UserSession, workDir, sourceRoot string, lowDirs []stri
 	}
 	e.Verified = true
 	return low, e
+}
+
+// diagnoseDestination measures a refused destination probe instead of guessing
+// at it: the tree's labels and ACLs, the file system, Defender's Controlled
+// Folder Access and ASR state and its block events since the probe started,
+// and the same probe run as the account at MEDIUM, the control that says
+// whether the refusal is integrity-specific.
+func diagnoseDestination(s *UserSession, workDir, self, vol, lowDir, madeDir string, since time.Time) []string {
+	var out []string
+	run := func(label string, name string, args ...string) {
+		b, err := exec.Command(name, args...).CombinedOutput()
+		line := label + ": " + strings.TrimSpace(tail(string(b), 3000))
+		if err != nil {
+			line += fmt.Sprintf(" (%v)", err)
+		}
+		out = append(out, line)
+	}
+	letter := strings.TrimSuffix(filepath.VolumeName(vol), `\`)
+	run("icacls /T "+lowDir+" (labels and DACLs of everything the Low probe made)", "icacls", lowDir, "/T")
+	run("icacls /T "+madeDir, "icacls", madeDir, "/T")
+	run("fsutil fsinfo volumeinfo "+letter, "fsutil", "fsinfo", "volumeinfo", letter)
+	run("fsutil fsinfo ntfsinfo "+letter, "fsutil", "fsinfo", "ntfsinfo", letter)
+	run("Defender preferences", "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		"Get-MpPreference | Select-Object EnableControlledFolderAccess, ControlledFolderAccessProtectedFolders, "+
+			"AttackSurfaceReductionRules_Ids, AttackSurfaceReductionRules_Actions | Format-List | Out-String -Width 300")
+	run("Defender Operational events 1121-1124 since the probe", "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf("$t=[datetime]'%s'; Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational'; "+
+			"Id=1121,1122,1123,1124; StartTime=$t} -ErrorAction SilentlyContinue | Format-List TimeCreated,Id,Message | "+
+			"Out-String -Width 300; 'events read'", since.Add(-5*time.Second).Format("2006-01-02T15:04:05")))
+	if med, err := IntegrityToken(s.Token, MediumIntegritySID); err != nil {
+		out = append(out, "the Medium control could not be set up: "+err.Error())
+	} else {
+		ms := &UserSession{Token: med, SID: s.SID, name: s.name, keepProfile: true}
+		mdir := lowDir + "-medium"
+		os.RemoveAll(mdir)
+		said, code := runAs(ms, workDir, self, "enforcement-probe", "-dest", mdir, "-harness-dir", madeDir)
+		out = append(out, fmt.Sprintf("CONTROL: the same probe as the account at Medium (%s): exit %d: %s",
+			MediumIntegritySID, code, strings.TrimSpace(said)))
+		os.RemoveAll(mdir)
+		syscall.CloseHandle(med)
+	}
+	return out
 }
 
 // runAs runs one command in the session and returns what it printed.

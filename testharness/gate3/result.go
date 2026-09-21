@@ -302,6 +302,9 @@ func (r *Result) Summary(required []string) string {
 		for _, p := range e.Probes {
 			fmt.Fprintf(&b, "              probe: %s\n", p)
 		}
+		for _, d := range e.Diagnostics {
+			fmt.Fprintf(&b, "              diag : %s\n", d)
+		}
 	}
 	if w := r.InstallerWrites; w != nil {
 		for _, l := range w.Denied {

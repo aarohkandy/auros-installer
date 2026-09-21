@@ -466,6 +466,7 @@ func cmdEnforcementProbe(args []string) error {
 	fs := flag.NewFlagSet("enforcement-probe", flag.ExitOnError)
 	dest := fs.String("dest", "", "a directory to create on a destination, as the installer would")
 	source := fs.String("source", "", "a tree whose every file must open for read")
+	harnessDir := fs.String("harness-dir", "", "a directory the harness made, for the raw CreateFileW comparison")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -519,6 +520,21 @@ func cmdEnforcementProbe(args []string) error {
 				fmt.Printf("ok      %s\n", v.what)
 			}
 		}
+		// Raw CreateFileW(CREATE_NEW), minimal FILE_WRITE_DATA|SYNCHRONIZE
+		// against GENERIC_WRITE, in a directory this process made and one the
+		// harness made, each with GetLastError and the thread's last NTSTATUS.
+		dirs := []string{meta}
+		if *harnessDir != "" {
+			dirs = append(dirs, *harnessDir)
+		}
+		for _, d := range dirs {
+			for _, a := range []struct {
+				name   string
+				access uint32
+			}{{"FILE_WRITE_DATA|SYNCHRONIZE", 0x2 | 0x100000}, {"GENERIC_WRITE", syscall.GENERIC_WRITE}} {
+				fmt.Printf("raw     %s\n", rawCreate(filepath.Join(d, "raw-"+strings.SplitN(a.name, "|", 2)[0]+".bin"), a.name, a.access))
+			}
+		}
 		if failed > 0 {
 			return fmt.Errorf("%d of the installer's write patterns were refused", failed)
 		}
@@ -542,4 +558,29 @@ func cmdEnforcementProbe(args []string) error {
 		fmt.Printf("%d files opened for read\n", n)
 	}
 	return nil
+}
+
+var procRtlGetLastNtStatus = syscall.NewLazyDLL("ntdll.dll").NewProc("RtlGetLastNtStatus")
+
+// rawCreate is one CreateFileW(CREATE_NEW) with exactly the access given. The
+// file is removed again when it was created.
+func rawCreate(path, name string, access uint32) string {
+	p, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return err.Error()
+	}
+	h, cerr := syscall.CreateFile(p, access, syscall.FILE_SHARE_READ, nil, syscall.CREATE_NEW,
+		syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	st, _, _ := procRtlGetLastNtStatus.Call()
+	if cerr != nil {
+		code := uint32(0)
+		if en, ok := cerr.(syscall.Errno); ok {
+			code = uint32(en)
+		}
+		return fmt.Sprintf("REFUSED CreateFileW(%s, %s): GetLastError %d (%v), NTSTATUS 0x%08X", path, name,
+			code, cerr, uint32(st))
+	}
+	syscall.CloseHandle(h)
+	os.Remove(path)
+	return fmt.Sprintf("ok      CreateFileW(%s, %s)", path, name)
 }

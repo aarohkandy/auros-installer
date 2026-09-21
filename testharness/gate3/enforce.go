@@ -47,8 +47,11 @@ type Enforcement struct {
 	Exemptions []string `json:"exemptions"`
 	ExemptWhy  string   `json:"exemptions_why"`
 	Probes     []string `json:"probes,omitempty"`
-	Verified   bool     `json:"verified"`
-	Error      string   `json:"error,omitempty"`
+	// Diagnostics is what the harness measured when a destination probe was
+	// refused: file system, Defender, labels, and the same probe at Medium.
+	Diagnostics []string `json:"diagnostics,omitempty"`
+	Verified    bool     `json:"verified"`
+	Error       string   `json:"error,omitempty"`
 }
 
 // Why says why the enforcement cannot vouch for a run; "" when it can.
