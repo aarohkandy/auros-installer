@@ -81,7 +81,7 @@ func run() error {
 	fs.BoolVar(&cfg.acknowledged, "i-understand-programs-do-not-migrate", false,
 		"confirm you have read the list of programs that will NOT come across")
 	fs.StringVar(&cfg.placeholders, "cloud-files", "",
-		"what to do about OneDrive Files On-Demand placeholders: hydrate (download them now) or skip (leave them in the cloud)")
+		"what to do about OneDrive Files On-Demand placeholders: hydrate (download them now); skip is not supported yet")
 	fs.StringVar(&cfg.bootMedia, "boot-media", "", "firmware boot entry for install media you already made")
 	fs.BoolVar(&cfg.restart, "restart", false, "restart at the end of a committed run")
 	fs.Int64Var(&cfg.maxFileBytes, "max-file-bytes", 0, "quarantine files larger than this (0 = no limit)")
@@ -352,8 +352,10 @@ func printDisclosure(programs []winenv.Program) {
 	for _, n := range names {
 		fmt.Printf("    - %s\n", n)
 	}
-	fmt.Println("\n  Your files, browser bookmarks and history, Wi-Fi networks, printers and")
-	fmt.Println("  account name do come across.")
+	fmt.Println("\n  Your files, browser bookmarks and history come across.")
+	fmt.Println("  Wi-Fi networks, printers and your account name do NOT come across yet:")
+	fmt.Println("  this tool does not export them. Note your Wi-Fi keys and printer")
+	fmt.Println("  addresses before you start; you will set them up again afterwards.")
 	fmt.Println("  Saved passwords, cookies and payment details in Chrome and Edge DO NOT.")
 	fmt.Println("  Export or sync them before you start.")
 }
@@ -490,6 +492,14 @@ func countPlaceholders(env winenv.Env, sources []copyengine.Source) (winenv.Plac
 // copied and before a school's uplink is saturated.
 func placeholderChoice(ph winenv.PlaceholderStats, flag string) (string, error) {
 	flag = strings.ToLower(strings.TrimSpace(flag))
+	// SYSTEM-REVIEW §2.21 / H10: copyengine.Options has no placeholder policy,
+	// so "skip" would hydrate every placeholder anyway against a space estimate
+	// that assumed it would not. Refused until the copy engine honours it.
+	if flag == "skip" {
+		return "", errors.New("inventory: --cloud-files=skip is not supported yet: the copy would still " +
+			"download every OneDrive placeholder. Use --cloud-files=hydrate, or make those files " +
+			"available offline (or move them out of the copied folders) before you start")
+	}
 	if ph.Count == 0 {
 		fmt.Println("\n  no OneDrive Files On-Demand placeholders were found.")
 		if flag == "" {
@@ -509,16 +519,15 @@ func placeholderChoice(ph winenv.PlaceholderStats, flag string) (string, error) 
 	fmt.Println("  You choose, and you choose now rather than forty minutes into the copy:")
 	fmt.Println("    --cloud-files=hydrate   download them all now. Slow on a school connection,")
 	fmt.Println("                            and they have to fit on the backup drive.")
-	fmt.Println("    --cloud-files=skip      leave them in the cloud. They are already in two")
-	fmt.Println("                            places, which is the whole point of the rule, and")
-	fmt.Println("                            they are listed in the report so you can see them.")
+	fmt.Println("  Leaving them in the cloud (--cloud-files=skip) is not supported yet: the")
+	fmt.Println("  copy would download them anyway.")
 	switch flag {
-	case "hydrate", "skip":
+	case "hydrate":
 		return flag, nil
 	case "":
-		return "", errors.New("inventory: choose what happens to the cloud placeholders with --cloud-files=hydrate or --cloud-files=skip")
+		return "", errors.New("inventory: choose what happens to the cloud placeholders with --cloud-files=hydrate")
 	default:
-		return "", fmt.Errorf("inventory: --cloud-files=%q: expected hydrate or skip", flag)
+		return "", fmt.Errorf("inventory: --cloud-files=%q: expected hydrate", flag)
 	}
 }
 

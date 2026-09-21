@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,7 +125,7 @@ func TestPlaceholderChoice_RefusesToStartUntilTheUserHasChosen(t *testing.T) {
 	if _, err := placeholderChoice(ph, "maybe"); err == nil {
 		t.Fatal("an unrecognised choice was accepted")
 	}
-	for _, want := range []string{"hydrate", "skip"} {
+	for _, want := range []string{"hydrate"} {
 		got, err := placeholderChoice(ph, want)
 		if err != nil || got != want {
 			t.Errorf("placeholderChoice(%q) = %q, %v", want, got, err)
@@ -170,5 +171,58 @@ func TestCountPlaceholders_SumsEverySourceRoot(t *testing.T) {
 func TestUsage_SaysDryRunIsTheDefault(t *testing.T) {
 	if !strings.Contains(usage, "DRY RUN IS THE DEFAULT") {
 		t.Error("the usage text no longer states that dry run is the default")
+	}
+}
+
+// captureStdout runs f and returns what it printed.
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	f()
+	os.Stdout = old
+	w.Close()
+	b, _ := io.ReadAll(r)
+	return string(b)
+}
+
+// ---------- phase 2: the §4.2 disclosure must be true ----------
+
+func TestDisclosure_DoesNotClaimWiFiPrintersOrAccountNameComeAcross(t *testing.T) {
+	// SYSTEM-REVIEW §2.8: no Wi-Fi, printer or account-name export code exists
+	// anywhere in this repository, and the one screen prohibition §4.2 exists to
+	// make honest said all three come across. It must say they do not.
+	out := strings.Join(strings.Fields(captureStdout(t, func() { printDisclosure(nil) })), " ")
+	if strings.Contains(out, "Wi-Fi networks, printers and account name do come across") {
+		t.Fatal("the disclosure still claims Wi-Fi, printers and account name come across")
+	}
+	if !strings.Contains(out, "Wi-Fi networks, printers and your account name do NOT come across") {
+		t.Errorf("the disclosure does not say Wi-Fi, printers and account name stay behind:\n%s", out)
+	}
+}
+
+// ---------- §2.21: a flag that lies is worse than a flag that is absent ----------
+
+func TestPlaceholderChoice_RefusesSkipUntilTheCopyEngineHonoursIt(t *testing.T) {
+	// copyengine.Options has no placeholder policy, so "skip" hydrated every
+	// placeholder anyway, sized the destination too small, and promised a list
+	// that was never produced. Refused, with or without placeholders present.
+	for _, ph := range []winenv.PlaceholderStats{{}, {Count: 4210, LogicalSize: 180 << 30}} {
+		var err error
+		captureStdout(t, func() { _, err = placeholderChoice(ph, "skip") })
+		if err == nil {
+			t.Fatalf("--cloud-files=skip was accepted with %d placeholders; nothing honours it", ph.Count)
+		}
+		if !strings.Contains(err.Error(), "not supported yet") {
+			t.Errorf("the refusal does not say why: %v", err)
+		}
+	}
+	out := captureStdout(t, func() { placeholderChoice(winenv.PlaceholderStats{Count: 1, LogicalSize: 1}, "hydrate") })
+	if strings.Contains(out, "listed in the report") {
+		t.Error("the prompt still promises a placeholder list nothing produces")
 	}
 }
