@@ -349,3 +349,101 @@ func WarmProfile(s *UserSession, workDir, corpusRoot string) (map[string]string,
 	}
 	return env, nil
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUIESCE
+//
+// A hosted runner is a busy Windows machine with other people's software on it,
+// and the change journal cannot say which process wrote a record. Every one of
+// those writers therefore costs an EXCLUSION — a hole in the check that says
+// "nothing was written to the system disk" — unless it is stopped instead.
+//
+// So the harness stops them. This was measured, not guessed: the first clean run
+// on a fresh runner reported sixty-three changes to C: that were not the
+// installer's, and every one belonged to something on this list — Firefox's
+// default-browser agent creating a profile, Google's updater writing its log,
+// the DirectX database updater rewriting an app-compat database, Windows
+// Update's settings store, the licensing service's scheduled task.
+//
+// Quieting a machine before measuring it is ordinary practice. What matters is
+// that it REPLACES exclusions rather than adding to them: every service stopped
+// here is one the noise list does not have to forgive, and what is left is
+// printed in every result.
+//
+// It is best-effort by design. A service that will not stop is not a reason to
+// abandon a run; it is a reason for its writes to show up as unexplained, which
+// is the failure mode this check is supposed to have.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// quiesceServices are stopped and disabled before any measurement.
+var quiesceServices = []string{
+	"wuauserv",  // Windows Update
+	"UsoSvc",    // the update orchestrator
+	"DoSvc",     // delivery optimisation
+	"gupdate",   // Google's updater
+	"gupdatem",  // Google's updater, the other one
+	"MozillaMaintenance",
+	"edgeupdate",
+	"edgeupdatem",
+	"WSearch",   // already disabled on this image; harmless to assert
+	"DiagTrack", // connected user experiences and telemetry
+	"dmwappushservice",
+}
+
+// quiesceTasks are scheduled tasks disabled before any measurement. The Azure
+// guest agent is deliberately NOT here: stopping the thing that tells the host
+// this VM is alive is not a trade worth making for one exclusion.
+var quiesceTasks = []string{
+	`\Mozilla\Firefox Default Browser Agent 308046B0AF4A39CB`,
+	`\Mozilla\Firefox Default Browser Agent D2CEB5FDA0BB1E4C`,
+	`\GoogleSystem\GoogleUpdater\GoogleUpdaterTaskSystem124.0.6367.0{C4B4C5E1-9EE9-4F58-A3FC-0FBF4D3E5C5E}`,
+	`\Microsoft\Windows\DirectX\DirectXDatabaseUpdater`,
+	`\Microsoft\Windows\SoftwareProtectionPlatform\SvcRestartTask`,
+	`\Microsoft\Windows\Application Experience\MareBackup`,
+	`\Microsoft\Windows\Application Experience\PcaPatchDbTask`,
+	`\Microsoft\Windows\Application Experience\StartupAppTask`,
+	`\Microsoft\Windows\Maintenance\WinSAT`,
+	`\Microsoft\Windows\UpdateOrchestrator\Schedule Scan`,
+	`\Microsoft\Windows\WindowsUpdate\Scheduled Start`,
+}
+
+// Quiesce stops what it can and reports what it did, in full, so the list can be
+// read against the exclusions in a result.
+func Quiesce() []string {
+	var did []string
+	for _, svc := range quiesceServices {
+		out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf("Stop-Service -Name '%s' -Force -ErrorAction SilentlyContinue; "+
+				"Set-Service -Name '%s' -StartupType Disabled -ErrorAction SilentlyContinue; "+
+				"(Get-Service -Name '%s' -ErrorAction SilentlyContinue).Status", svc, svc, svc)).CombinedOutput()
+		status := strings.TrimSpace(string(out))
+		if err != nil || status == "" {
+			did = append(did, fmt.Sprintf("service %-20s not present", svc))
+			continue
+		}
+		did = append(did, fmt.Sprintf("service %-20s %s", svc, status))
+	}
+	// Whole folders of scheduled tasks, plus the named ones: the image's
+	// third-party updaters name their tasks with version numbers that change.
+	for _, folder := range []string{`\Mozilla\`, `\GoogleSystem\`} {
+		out, _ := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf("Get-ScheduledTask -TaskPath '%s*' -ErrorAction SilentlyContinue | "+
+				"Disable-ScheduledTask -ErrorAction SilentlyContinue | "+
+				"ForEach-Object { $_.TaskName }", folder)).CombinedOutput()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				did = append(did, "task    "+folder+line+" disabled")
+			}
+		}
+	}
+	for _, task := range quiesceTasks {
+		out, err := exec.Command("schtasks", "/change", "/tn", task, "/disable").CombinedOutput()
+		if err != nil {
+			did = append(did, fmt.Sprintf("task    %-60s not present", task))
+			continue
+		}
+		_ = out
+		did = append(did, fmt.Sprintf("task    %-60s disabled", task))
+	}
+	return did
+}

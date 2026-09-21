@@ -73,9 +73,21 @@ var noiseRules = []NoiseRule{
 	{Pattern: `^c:\\windows\\system32\\wbem\\performance\\`, Why: "the WMI performance-counter cache, rebuilt by any WMI query"},
 	{Pattern: `^c:\\programdata\\microsoft\\(windows defender|windows\\wer|network|crypto|diagnosis|windows\\appreplocations|windows\\caches|clipsvc)\\`, Why: "Defender, error reporting, and the licensing and crypto stores"},
 	{Pattern: `^c:\\programdata\\microsoft\\windows\\start menu\\`, Why: "start-menu bookkeeping"},
-	{Pattern: `^c:\\programdata\\usoshared\\`, Why: "the update orchestrator"},
+	{Pattern: `^c:\\programdata\\(usoshared|usoprivate)\\`, Why: "the update orchestrator's stores"},
+	{Pattern: `^c:\\programdata\\microsoft\\windows\\onesettings\\`, Why: "Windows' own settings cache"},
+	{Pattern: `^c:\\users\\[^\\]+\\appdata\\locallow\\microsoft\\cryptneturlcache\\`,
+		Why: "the certificate-revocation cache, written by whichever process last validated a certificate"},
+	{Pattern: `^c:\\windows\\system32\\smi\\store\\`, Why: "the component store's database, written by servicing"},
+	{Pattern: `^c:\\windows\\apppatch\\`, Why: "the application-compatibility database"},
+	{Pattern: `^c:\\programdata\\microsoft\\(diagnosticlogcsp|provisioning|windows\\clipsvc)\\`,
+		Why: "the diagnostic-log collector and the provisioning sequence, both of which Windows runs on " +
+			"its own schedule"},
 
 	{Pattern: `^c:\\actions-runner\\`, Why: "the CI runner's own installation and diagnostic logs"},
+	{Pattern: `^c:\\windowsazure\\`,
+		Why: "the Azure guest agent's status logs. This runner is a VM and its HOST writes here; it is " +
+			"the one entry on this list that exists because of where the test runs rather than because " +
+			"of what Windows does"},
 	{Pattern: `^c:\\actionarchivecache\\`, Why: "the CI runner's action cache"},
 
 	{Pattern: `^c:\\users\\runneradmin\\appdata\\local\\temp\\`, Why: "the CI account's temp directory"},

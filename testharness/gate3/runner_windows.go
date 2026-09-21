@@ -342,8 +342,26 @@ func monitor(p *Process, in *Injector, g *Golden, sc *Scenario, pin Pin, destDir
 	freeAtStart, _, _ := FreeBytes(cfg.DestVolume)
 
 	manifestPath := filepath.Join(destDir, MetaDirName, "manifest.tsv")
-	partialPath := filepath.Join(destDir, filepath.FromSlash(pin.Archive)+PartialSuffix)
 	target := pin.CumulativeBytes
+
+	// A scenario that fires when the installer STARTS a particular file needs
+	// that file to take long enough to notice. The byte pin usually lands in a
+	// large one — large files dominate the byte count — but "usually" is how a
+	// scenario ends up firing on a 3 KB file that was copied between two polls
+	// and reporting that it never fired. So the watched file is the first one at
+	// or after the pin that is big enough to be caught in the act, and the
+	// record says which it was.
+	watch := pin
+	if sc.Trigger == TriggerPartial {
+		for _, r := range g.ByCopy {
+			if r.CopyIndex >= pin.CopyIndex && r.Size >= 4<<20 {
+				watch.CopyIndex, watch.Archive, watch.Path = r.CopyIndex, r.Archive, r.Path
+				break
+			}
+		}
+		rec.TargetPath, rec.TargetArchive = watch.Path, watch.Archive
+	}
+	partialPath := filepath.Join(destDir, filepath.FromSlash(watch.Archive)+PartialSuffix)
 
 	var readAtBoundary int64 = -1
 	deadline := time.Now().Add(cfg.Timeout)
@@ -369,11 +387,11 @@ func monitor(p *Process, in *Injector, g *Golden, sc *Scenario, pin Pin, destDir
 
 		switch {
 		case sc.Trigger == TriggerPartial:
-			if st, serr := os.Stat(partialPath); serr == nil && st.Size() >= 0 {
+			if _, serr := os.Stat(partialPath); serr == nil {
 				rec.ObservedBytes = io.Written
-				rec.ObservedNote = "fired when the installer created the partial file for the pinned " +
-					"source file, which is the instant it started reading it"
-				fireNow(p, in, g, sc, pin, destDir, cfg, rec, devs, freeAtStart)
+				rec.ObservedNote = "fired when the installer created the partial file for " + watch.Path +
+					", which is the instant it started reading it"
+				fireNow(p, in, g, sc, watch, destDir, cfg, rec, devs, freeAtStart)
 				return rec
 			}
 		case sc.Phase == PhaseCopy:
@@ -427,8 +445,10 @@ func fireNow(p *Process, in *Injector, g *Golden, sc *Scenario, pin Pin, destDir
 		fail(in.DismountDestination())
 
 	case ActionFillDestination:
-		_, err := in.FillDestination(0)
+		n, err := in.FillDestination(0)
 		fail(err)
+		free, _, _ := FreeBytes(cfg.DestVolume)
+		rec.TargetPath = fmt.Sprintf("«the destination volume»: %d bytes consumed, %d left free", n, free)
 
 	case ActionMutateSource, ActionMutateSourceOnce:
 		rec_, err := TargetFromPin(g, pin, sc.TargetDeltaBytes)

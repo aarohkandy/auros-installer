@@ -132,30 +132,51 @@ func (in *Injector) DismountDestination() error {
 // several seconds later, by which time the installer would be somewhere else
 // entirely.
 func (in *Injector) FillDestination(leaveBytes int64) (int64, error) {
-	free, _, err := FreeBytes(in.DestVolume)
-	if err != nil {
-		return 0, err
-	}
-	want := free - leaveBytes
-	if want <= 0 {
-		return 0, nil
-	}
 	p := filepath.Join(in.DestVolume, "auros-harness-balloon.bin")
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
-	for want > 0 {
-		if err := f.Truncate(want); err == nil {
-			return want, f.Sync()
+
+	// Grow until the volume really is full, re-measuring every time.
+	//
+	// The first version asked for all the free space at once and, when that was
+	// refused, halved the request until it succeeded — which left a volume with
+	// twenty gigabytes free and an installer that finished the copy perfectly.
+	// The run reported that honestly ("the installer exited 0"), and the fault
+	// was mine. Asking for the space that is left, and then asking again, is the
+	// only form of this that ends with a full volume.
+	var size int64
+	for attempt := 0; attempt < 40; attempt++ {
+		free, _, ferr := FreeBytes(in.DestVolume)
+		if ferr != nil {
+			return size, ferr
 		}
-		want /= 2
-		if want < 1<<20 {
-			break
+		if free <= leaveBytes+(64<<10) {
+			return size, f.Sync()
 		}
+		want := size + (free - leaveBytes)
+		if terr := f.Truncate(want); terr != nil {
+			// Refused: take half of what is left instead and go round again.
+			want = size + (free-leaveBytes)/2
+			if want <= size {
+				return size, fmt.Errorf("gate3: could not consume the destination's free space: %d bytes "+
+					"still free after %d attempts: %w", free, attempt+1, terr)
+			}
+			if terr2 := f.Truncate(want); terr2 != nil {
+				return size, fmt.Errorf("gate3: could not consume the destination's free space (%d free): %w",
+					free, terr2)
+			}
+		}
+		size = want
 	}
-	return 0, fmt.Errorf("gate3: could not consume the destination's free space")
+	free, _, _ := FreeBytes(in.DestVolume)
+	if free > leaveBytes+(64<<10) {
+		return size, fmt.Errorf("gate3: the destination still has %d bytes free after filling it: the "+
+			"scenario did not happen", free)
+	}
+	return size, f.Sync()
 }
 
 // MutateFile rewrites two regions of a file with deterministic bytes.

@@ -120,6 +120,14 @@ func cmdPrepare(args []string) error {
 		return err
 	}
 
+	// Quiet the machine before anything is measured: every background writer
+	// stopped here is one the change-journal noise list does not have to
+	// forgive. What it did is printed in full.
+	fmt.Println("quiescing the machine's own background software:")
+	for _, line := range gate3.Quiesce() {
+		fmt.Println("  " + line)
+	}
+
 	// A bigger change journal so that a busy run cannot wrap it. A wrap is
 	// detected and fails the check; it is removed as a variable anyway, because
 	// a check that fails for capacity reasons is a check people learn to ignore.
