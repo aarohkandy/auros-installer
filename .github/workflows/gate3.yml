@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       clean_runs: { description: 'unused in probe', default: '100', type: string }
+  push:
+    paths: ['internal/**', 'cmd/**', 'testharness/**', '.github/workflows/gate3.yml']
 defaults:
   run:
     shell: pwsh
