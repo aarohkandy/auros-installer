@@ -203,19 +203,15 @@ func isLimited(tok syscall.Handle) bool {
 }
 
 func tokenSID(tok syscall.Handle) (string, error) {
-	var n uint32
-	syscall.GetTokenInformation(syscall.Token(tok), syscall.TokenUser, nil, 0, &n)
-	if n == 0 {
-		return "", fmt.Errorf("gate3: TokenUser size is zero")
-	}
-	buf := make([]byte, n)
-	if err := syscall.GetTokenInformation(syscall.Token(tok), syscall.TokenUser, &buf[0], n, &n); err != nil {
+	// GetTokenUser rather than a hand-built TOKEN_USER: the structure's first
+	// field is a POINTER into the buffer, and reading it back through a uintptr
+	// is the one unsafe.Pointer conversion that is genuinely unsound — `go vet`
+	// rejects it, and internal/winenv had the same bug (D35).
+	u, err := syscall.Token(tok).GetTokenUser()
+	if err != nil {
 		return "", err
 	}
-	// TOKEN_USER is SID_AND_ATTRIBUTES: a pointer to the SID, then attributes.
-	sidPtr := *(*uintptr)(unsafe.Pointer(&buf[0]))
-	sid := (*syscall.SID)(unsafe.Pointer(sidPtr))
-	return sid.String()
+	return u.User.Sid.String()
 }
 
 // Process is a running installer under harness control.

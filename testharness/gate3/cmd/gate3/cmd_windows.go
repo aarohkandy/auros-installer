@@ -158,8 +158,8 @@ func cmdPrepare(args []string) error {
 		fmt.Printf("  %-40s %s\n", k, v)
 	}
 	fmt.Println("\nthe installer will inventory THESE folders, because it asks Windows where they are " +
-		"(SHGetKnownFolderPath) rather than assuming %USERPROFILE%. If it ever stopped doing that, every " +
-		"run would come up empty and check C9 would say so.")
+		"(SHGetKnownFolderPath) rather than assuming the user profile directory. If it ever stopped " +
+		"doing that, every run would come up empty and check C9 would say so.")
 	return nil
 }
 
