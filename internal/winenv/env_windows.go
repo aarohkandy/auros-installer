@@ -102,6 +102,12 @@ func Available() bool { return true }
 func (w *winEnv) Platform() string { return "windows" }
 
 func (w *winEnv) KnownFolders() ([]Folder, error) {
+	// LazyProc.Call PANICS when the DLL or the symbol cannot be loaded; Find
+	// returns the error instead. A machine whose shell32 fails to initialise
+	// must get a sentence, not a crash dump (gate3 run 35671658363).
+	if err := procSHGetKnownFolderPath.Find(); err != nil {
+		return nil, fmt.Errorf("cannot look up your folders: shell32.dll SHGetKnownFolderPath is unavailable: %w", err)
+	}
 	out := make([]Folder, 0, len(knownFolderIDs))
 	for _, kf := range knownFolderIDs {
 		id := kf.ID
