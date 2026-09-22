@@ -294,8 +294,12 @@ func (r *Result) Summary(required []string) string {
 			r.Archive.Present, r.Archive.HashMatches, len(r.Archive.Corrupt), len(r.Archive.Extra), len(r.Archive.Partials))
 	}
 	if e := r.Enforcement; e != nil {
-		fmt.Fprintf(&b, "   enforce  : %s at %s, verified %v, labelled Low: %s, exempt: %s\n",
-			e.Mechanism, e.Integrity, e.Verified, strings.Join(e.LabeledLow, ", "), strings.Join(e.Exemptions, ", "))
+		fmt.Fprintf(&b, "   enforce  : %s; token %s; %d of %d directories on C: writable and denied (scan %.1fs); "+
+			"verified %v; exempt: %s; %s\n", e.Mechanism, e.Token, len(e.Writable), e.Scanned, e.ScanSeconds,
+			e.Verified, strings.Join(e.Exemptions, ", "), e.Restored)
+		for _, r := range e.WritableRoots {
+			fmt.Fprintf(&b, "              writable: %s\n", r)
+		}
 		if e.Error != "" {
 			fmt.Fprintf(&b, "              ! %s\n", e.Error)
 		}

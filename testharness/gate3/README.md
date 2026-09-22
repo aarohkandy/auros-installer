@@ -37,22 +37,32 @@ possible way to test nothing at all.
 
 Nothing in a verdict comes from the installer's account of itself.
 
-**The invariant — nothing written to C:, by enforcement.** The installer's process tree runs at **Low
-mandatory integrity**. Windows treats every object without a label as Medium, and the default policy,
-`NO_WRITE_UP`, refuses a Low process write access to it before the DACL is consulted — so there is no ACL
-to propagate and no protected DACL (`C:\ProgramData`, `C:\Windows`) to slip past. Reading is untouched
-(`NO_READ_UP` is not the default for files). Only the harness's destination volumes and work directory,
-none of them on C:, are labelled Low. Before every run the session is proved: `whoami /groups` must show
-`S-1-16-4096`, and `md` must be refused at `C:\`, `C:\ProgramData`, `C:\Windows\Temp`,
-`C:\Program Files`, `C:\Users\Public`, the account's profile and its TEMP, and must succeed on each
-destination. C1 then reads the ETW trace for the installer's tree and fails on any write-class operation
-on C: outside the profile exemption (which is how a write to something Windows itself labels Low is still
-caught), any open Windows refused (`STATUS_ACCESS_DENIED`), or an enforcement that was not verified.
-The first design, a deny ACE on `C:\`, took 282 s to propagate and never reached `C:\ProgramData`.
+**The invariant — nothing written to C:, by enforcement.** The installer runs on the migration account's
+**standard-user token**: the account is not an administrator, and the run refuses a token that is elevated
+or holds Administrators enabled. What a standard user may still write on C: is **enumerated on the
+runner, not remembered**: every directory of C: is opened as the account for `MAXIMUM_ALLOWED` and the
+granted mask read back (nothing is written), and each directory where it holds any write-class right
+(`0xd0156`: add-file, add-subdirectory, write-EA, delete-child, write-attributes, delete, write-DAC,
+write-owner) gets an explicit deny ACE for the account on that directory alone —
+`SetKernelObjectSecurity`, no propagation. The list, its roots with counts and the scan time are in the
+result (`enforcement.writable_dirs`, `writable_roots`, `scan_seconds`). Before the run the deny is proved:
+the granted mask is re-read on every denied directory, a directory and a file are created as the account
+in a sample (`C:\`, `C:\ProgramData`, `C:\Windows\Temp`, `C:\Program Files`, `C:\Users\Public`, its
+profile and TEMP, the corpus, the first writable directories) and every one must be refused, and the
+installer's own write patterns on each destination must succeed. After the run every directory's saved
+descriptor is put back (`enforcement.restored`). There are no exemptions: the installer writes no TEMP,
+logs or caches on Windows. C1 then reads the ETW trace for the installer's tree and fails on any
+write-class operation on C:, any open Windows refused (`STATUS_ACCESS_DENIED`: it tried), or an
+enforcement that was not verified. Measured history: a deny ACE on `C:\` took 282 s and never reached
+`C:\ProgramData`; Low integrity blocked C: but also every file create on the NTFS destination.
 
-One consequence, stated: at Low the installer's `manage-bde -status` probe cannot answer, so BitLocker is
-reported unknown and the suspend step is planned anyway — the path the installer already takes on a
-machine where the probe fails.
+Known ceilings, stated: a directory's owner keeps WRITE_DAC whatever its DACL says, and an existing file
+whose own ACL grants the account write is not denied (only directories are); both are left to the ETW
+audit, which fails the write itself.
+
+One consequence, stated: as a standard user the installer's `manage-bde -status` probe cannot answer, so
+BitLocker is reported unknown and the suspend step is planned anyway — the path the installer already
+takes on a machine where the probe fails.
 
 The whole-disk change-journal diff this replaced never converged on a shared runner: Windows' own
 servicing writes C: whatever the installer does. It is still recorded, as a report line that never gates.

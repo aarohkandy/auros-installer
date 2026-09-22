@@ -295,8 +295,8 @@ func cmdFormatDestination(args []string) error {
 // cmdProveRed is DECISIONS.md D34 applied to C1, the one check that cannot be
 // exercised anywhere but here.
 //
-// It starts a copy of itself the way a run starts the installer — at Low
-// integrity, through the same launcher, under the same ETW trace — and that
+// It starts a copy of itself through the same launcher a run uses — at Low
+// integrity, which is simply the quickest way to get a refused write here — under the same ETW trace — and that
 // child reads a C: file, writes into a directory labelled Low that is NOT
 // exempt (standing in for something like LocalLow), tries to write into an
 // ordinary (Medium) directory, which Windows must refuse, and writes into a
@@ -423,7 +423,7 @@ func cmdProveRed(args []string) error {
 			return fmt.Errorf("C1's classification is wrong on a real trace: %s", c.what)
 		}
 	}
-	enf := &gate3.Enforcement{Mechanism: "prove-red", Integrity: gate3.LowIntegritySID, Verified: true,
+	enf := &gate3.Enforcement{Mechanism: "prove-red", Token: "a Low-integrity child", Verified: true,
 		Exemptions: []string{exempt}}
 	ok, detail := gate3.SystemDiskVerdict(enf, w)
 	fmt.Printf("C1 on this window: ok=%v: %s\n", ok, detail)
@@ -457,18 +457,48 @@ func cmdProveRedChild(args []string) error {
 	return nil
 }
 
-// cmdEnforcementProbe runs inside the installer's Low-integrity session (see
+// cmdEnforcementProbe runs as the migration account (see
 // gate3.ApplyEnforcement). -dest does what the installer does on a destination:
 // creates its directories itself, creates a run log for append inside them and
-// writes a file below. -source opens every file of the source for read. It
-// prints what it did and exits non-zero on the first thing refused.
+// writes a file below. -source opens every file of the source for read.
+// -deny-list names directories on C:, one per line, in each of which creating a
+// directory and a file must be refused. It prints what it did and exits
+// non-zero on the first thing that went the wrong way.
 func cmdEnforcementProbe(args []string) error {
 	fs := flag.NewFlagSet("enforcement-probe", flag.ExitOnError)
 	dest := fs.String("dest", "", "a directory to create on a destination, as the installer would")
 	source := fs.String("source", "", "a tree whose every file must open for read")
 	harnessDir := fs.String("harness-dir", "", "a directory the harness made, for the raw CreateFileW comparison")
+	denyList := fs.String("deny-list", "", "a file naming directories where every create must be refused")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *denyList != "" {
+		b, err := os.ReadFile(*denyList)
+		if err != nil {
+			return err
+		}
+		wrote := 0
+		for _, d := range strings.Split(string(b), "\r\n") {
+			if d = strings.TrimSpace(d); d == "" {
+				continue
+			}
+			dir := filepath.Join(d, "auros-gate3-deny-probe")
+			file := dir + ".txt"
+			derr := os.Mkdir(dir, 0o755)
+			ferr := os.WriteFile(file, []byte("x"), 0o644)
+			if derr == nil || ferr == nil {
+				wrote++
+				os.Remove(dir)
+				os.Remove(file)
+				fmt.Printf("WROTE   %s (directory: %v, file: %v)\n", d, derr, ferr)
+			} else {
+				fmt.Printf("refused %s\n", d)
+			}
+		}
+		if wrote > 0 {
+			return fmt.Errorf("%d directories on C: took a create", wrote)
+		}
 	}
 	if *dest != "" {
 		// Each variant is tried and reported, so a refusal says WHICH access

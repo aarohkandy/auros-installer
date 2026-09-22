@@ -66,7 +66,7 @@ func TestAuditWritesCatchesEveryInstallerWriteToC(t *testing.T) {
 		if !contains(c.bucket(w), c.want) {
 			t.Errorf("%s: %q not found in %+v", name, c.want, w)
 		}
-		enf := &Enforcement{Integrity: LowIntegritySID, Verified: true, Exemptions: []string{exemptProfile}}
+		enf := &Enforcement{Token: "standard", Verified: true, Exemptions: []string{exemptProfile}}
 		if ok, detail := SystemDiskVerdict(enf, w); ok {
 			t.Errorf("%s: C1 passed: %s", name, detail)
 		}
@@ -99,7 +99,7 @@ func TestAuditWritesPassesWhatIsNotTheInstallerWritingToC(t *testing.T) {
 	if len(w.Exempt) != 2 || !contains(w.Exempt, `\appdata\local\temp\t.tmp`) {
 		t.Fatalf("writes inside the exemption must be listed, got %v", w.Exempt)
 	}
-	enf := &Enforcement{Integrity: LowIntegritySID, Verified: true, Exemptions: []string{exemptProfile}}
+	enf := &Enforcement{Token: "standard", Verified: true, Exemptions: []string{exemptProfile}}
 	if ok, detail := SystemDiskVerdict(enf, w); !ok {
 		t.Fatalf("C1 failed a clean trace: %s", detail)
 	}
@@ -108,8 +108,8 @@ func TestAuditWritesPassesWhatIsNotTheInstallerWritingToC(t *testing.T) {
 func TestEnforcementFailsClosed(t *testing.T) {
 	for name, e := range map[string]*Enforcement{
 		"none":       nil,
-		"unverified": {Integrity: LowIntegritySID},
-		"a probe that wrote to C:": {Integrity: LowIntegritySID, Verified: true,
+		"unverified": {Token: "standard"},
+		"a probe that wrote to C:": {Token: "standard", Verified: true,
 			Error: `md C:\ProgramData\x at Low: exit 0, created true`},
 	} {
 		if ok, _ := SystemDiskVerdict(e, &WriteAudit{Events: 5}); ok {
@@ -128,4 +128,50 @@ func contains(l []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func TestDenySDDLPrependsAndRefusesANullDACL(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	deny := "(D;;0xd0156;;;" + sid + ")"
+	for in, want := range map[string]string{
+		"D:PAI(A;OICI;FA;;;SY)(A;;0x1200a9;;;BU)": "D:PAI" + deny + "(A;OICI;FA;;;SY)(A;;0x1200a9;;;BU)",
+		"D:AI(A;ID;FA;;;BA)":                      "D:AI" + deny + "(A;ID;FA;;;BA)",
+		"D:(A;;FA;;;SY)":                          "D:" + deny + "(A;;FA;;;SY)",
+		"D:P":                                     "D:P" + deny,
+		"O:BAD:ARAI(A;;FA;;;SY)S:AI":              "O:BAD:ARAI" + deny + "(A;;FA;;;SY)S:AI",
+	} {
+		got, err := DenySDDL(in, sid)
+		if err != nil || got != want {
+			t.Errorf("DenySDDL(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"D:NO_ACCESS_CONTROL", "O:BAG:SY", "D:X(A;;FA;;;SY)"} {
+		if got, err := DenySDDL(bad, sid); err == nil {
+			t.Errorf("DenySDDL(%q) = %q, want a refusal", bad, got)
+		}
+	}
+}
+
+func TestDenyMaskNeverCountsAReadRight(t *testing.T) {
+	if DenyMask != 0xd0156 {
+		t.Fatalf("DenyMask = 0x%x", DenyMask)
+	}
+	if got := strings.Join(WriteRights(0x1200a9|0x2|0x40000), ","); got != "add-file,write-dac" {
+		t.Fatalf("WriteRights = %q: read rights must not count, write rights must", got)
+	}
+	if len(WriteRights(0x1200a9)) != 0 {
+		t.Fatal("read-and-execute counted as writable")
+	}
+}
+
+func TestWritableRootsNeverSplitASubtree(t *testing.T) {
+	got := WritableRoots([]string{`C:\ProgramData\a`, `C:\ProgramData\a\b`, `C:\ProgramData\a\b\c`,
+		`C:\Windows\Temp`, `C:\hostedtoolcache\x`, `C:\hostedtoolcache\x\y`, `C:\ProgramData\ab`})
+	want := []string{`C:\ProgramData\a (3)`, `C:\ProgramData\ab (1)`, `C:\Windows\Temp (1)`, `C:\hostedtoolcache\x (2)`}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("WritableRoots = %v, want %v", got, want)
+	}
+	if got := WritableRoots([]string{`C:\`, `C:\x`, `C:\x\y`}); len(got) != 1 || got[0] != `C:\ (3)` {
+		t.Fatalf("a writable C:\\ must be the one root: %v", got)
+	}
 }
