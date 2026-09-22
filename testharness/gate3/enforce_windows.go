@@ -81,6 +81,7 @@ var (
 	procNtQueryObject                        = modntdll.NewProc("NtQueryObject")
 	procImpersonateLoggedOnUser              = modadvapi32.NewProc("ImpersonateLoggedOnUser")
 	procRevertToSelf                         = modadvapi32.NewProc("RevertToSelf")
+	procAccessCheck                          = modadvapi32.NewProc("AccessCheck")
 	procGetKernelObjectSecurity              = modadvapi32.NewProc("GetKernelObjectSecurity")
 	procSetKernelObjectSecurity              = modadvapi32.NewProc("SetKernelObjectSecurity")
 	procConvertSecurityDescriptorToStringSDW = modadvapi32.NewProc("ConvertSecurityDescriptorToStringSecurityDescriptorW")
@@ -344,6 +345,13 @@ func scanWritable(tok syscall.Handle, root string) (w []writableDir, scanned int
 		}
 		scanned++
 		g, gerr := grantedAs(tok, p)
+		if gerr == errSharingViolation {
+			// Held open by another process with a share mode that excludes the data
+			// rights MAXIMUM_ALLOWED asks for (run 35670743966: the Actions runner's
+			// own bin directory). Sharing never governs READ_CONTROL, so compute the
+			// same answer from the security descriptor with AccessCheck.
+			g, gerr = grantedBySD(tok, p)
+		}
 		var imp errImpersonation
 		switch {
 		case errors.As(gerr, &imp):
@@ -570,4 +578,54 @@ func profileDir(tok syscall.Handle) (string, error) {
 		return "", e
 	}
 	return syscall.UTF16ToString(buf), nil
+}
+
+// errSharingViolation is ERROR_SHARING_VIOLATION (32).
+const errSharingViolation = syscall.Errno(32)
+
+// grantedBySD returns the access tok would be granted to dir, computed by
+// AccessCheck against dir's owner, group and DACL — read by the harness with
+// READ_CONTROL, which share modes do not govern — with the file generic mapping
+// (learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-accesscheck).
+// It is the fallback for directories another process holds open; nothing is written.
+func grantedBySD(tok syscall.Handle, dir string) (uint32, error) {
+	h, err := openDir(dir, readControl)
+	if err != nil {
+		return 0, err
+	}
+	defer syscall.CloseHandle(h)
+	const info = 0x1 | 0x2 | 0x4 // OWNER | GROUP | DACL _SECURITY_INFORMATION
+	var need uint32
+	procGetKernelObjectSecurity.Call(uintptr(h), info, 0, 0, uintptr(unsafe.Pointer(&need)))
+	if need == 0 {
+		return 0, fmt.Errorf("GetKernelObjectSecurity reported a zero-length descriptor for %s", dir)
+	}
+	sd := make([]byte, need)
+	if r, _, e := procGetKernelObjectSecurity.Call(uintptr(h), info, uintptr(unsafe.Pointer(&sd[0])),
+		uintptr(need), uintptr(unsafe.Pointer(&need))); r == 0 {
+		return 0, fmt.Errorf("GetKernelObjectSecurity %s: %w", dir, e)
+	}
+	// AccessCheck needs an impersonation token.
+	const tokenQuery, tokenDuplicate, tokenImpersonate = 0x0008, 0x0002, 0x0004
+	const securityIdentification, tokenImpersonation = 1, 2
+	var imp syscall.Handle
+	if r, _, e := procDuplicateTokenEx.Call(uintptr(tok), tokenQuery|tokenDuplicate|tokenImpersonate, 0,
+		securityIdentification, tokenImpersonation, uintptr(unsafe.Pointer(&imp))); r == 0 {
+		return 0, fmt.Errorf("DuplicateTokenEx (impersonation) for AccessCheck: %w", e)
+	}
+	defer syscall.CloseHandle(imp)
+	// GENERIC_MAPPING for files: FILE_GENERIC_READ, _WRITE, _EXECUTE, FILE_ALL_ACCESS.
+	mapping := [4]uint32{0x120089, 0x120116, 0x1200A0, 0x1F01FF}
+	var privs [256]byte
+	privLen := uint32(len(privs))
+	var granted, status uint32
+	if r, _, e := procAccessCheck.Call(uintptr(unsafe.Pointer(&sd[0])), uintptr(imp), maximumAllowed,
+		uintptr(unsafe.Pointer(&mapping[0])), uintptr(unsafe.Pointer(&privs[0])), uintptr(unsafe.Pointer(&privLen)),
+		uintptr(unsafe.Pointer(&granted)), uintptr(unsafe.Pointer(&status))); r == 0 {
+		return 0, fmt.Errorf("AccessCheck %s: %w", dir, e)
+	}
+	if status == 0 {
+		return 0, nil // no access granted at all
+	}
+	return granted, nil
 }
