@@ -113,8 +113,12 @@ func ApplyEnforcement(s *UserSession, workDir, sourceRoot string, destDirs []str
 			"that token could write, set on each directory alone",
 		DenyMask:   fmt.Sprintf("0x%x (%s)", DenyMask, strings.Join(WriteRights(DenyMask), ",")),
 		Exemptions: []string{},
-		ExemptWhy: "none: the installer writes no TEMP, logs or caches on Windows; its run log goes to the " +
-			"destination and its output to the harness's work directory, neither on C:",
+		ExemptWhy: "the migration account's own AppData only: loading shell32.dll at Medium integrity " +
+			"initialises per-user state under AppData\\Local, and with it denied the installer died at " +
+			"startup (run 35671658363: 'Failed to load shell32.dll: A dynamic link library (DLL) " +
+			"initialization routine failed'). AppData is operating-system and application state; the " +
+			"profile's user folders — the migration SOURCE — stay denied and audited. Writes inside the " +
+			"exemption are counted in C1's detail, never hidden.",
 	}
 	var denied []string
 	saved := map[string][]byte{}
@@ -188,7 +192,16 @@ func ApplyEnforcement(s *UserSession, workDir, sourceRoot string, destDirs []str
 		return e, restore
 	}
 
-	// ── deny each one, directly ──
+	// ── deny each one, directly — except inside the account's own AppData (see ExemptWhy) ──
+	appData := filepath.Join(prof, "AppData")
+	e.Exemptions = []string{appData}
+	kept := paths[:0:0]
+	for _, d := range paths {
+		if !underFold(d, appData) {
+			kept = append(kept, d)
+		}
+	}
+	paths = kept
 	for _, d := range paths {
 		orig, err := denyDir(d, s.SID)
 		if err != nil {
@@ -222,7 +235,7 @@ func ApplyEnforcement(s *UserSession, workDir, sourceRoot string, destDirs []str
 		"(an owner's implicit write-dac aside)", len(paths)))
 
 	sample := []string{`C:\`, `C:\ProgramData`, `C:\Windows\Temp`, `C:\Program Files`, `C:\Users\Public`,
-		prof, filepath.Join(prof, `AppData\Local\Temp`)}
+		prof}
 	if sourceRoot != "" {
 		sample = append(sample, sourceRoot)
 	}
@@ -628,4 +641,11 @@ func grantedBySD(tok syscall.Handle, dir string) (uint32, error) {
 		return 0, nil // no access granted at all
 	}
 	return granted, nil
+}
+
+// underFold reports whether p is dir or below it, case-insensitively (NTFS
+// names are case-insensitive for this purpose).
+func underFold(p, dir string) bool {
+	p, dir = strings.ToLower(filepath.Clean(p)), strings.ToLower(filepath.Clean(dir))
+	return p == dir || strings.HasPrefix(p, dir+`\`)
 }
