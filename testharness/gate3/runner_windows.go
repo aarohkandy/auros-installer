@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -40,7 +39,8 @@ type RunConfig struct {
 //
 // The order is the whole design:
 //
-//	drop the migration user to Low integrity and prove C: refuses it →
+//	run as the standard migration user, deny it every directory of C: it
+//	could write, and prove C: refuses it →
 //	start the trace → run the installer in that session → fire the scenario
 //	at its pin, measured from outside the process → read the trace →
 //	re-hash the source → re-hash the archive → read what the installer
@@ -104,24 +104,21 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	defer sess.Close()
 	res.Elevated = sess.Elevated
 
-	// ── C1: the installer runs at Low integrity, and that is proved first ────
-	// Only the harness's own volumes and work directory are labelled Low; every
-	// unlabelled object on C: is Medium, and Low cannot write up to it.
-	lowDirs := []string{cfg.DestVolume}
+	// ── C1: the installer runs as a standard user, denied every directory of
+	// C: it could write, and that is proved first (see enforce.go) ──
+	destDirs := []string{cfg.DestVolume}
 	if cfg.SmallVolume != "" {
-		lowDirs = append(lowDirs, cfg.SmallVolume)
+		destDirs = append(destDirs, cfg.SmallVolume)
 	}
 	if sc != nil && sc.Dest == DestAuto {
 		// The installer picks the volume with the most free space, which on a
 		// runner may be D:. Every fixed volume but C: is a candidate it must be
 		// able to write to; C: never is.
-		lowDirs = otherFixedVolumes(lowDirs)
+		destDirs = otherFixedVolumes(destDirs)
 	}
-	low, enf := ApplyEnforcement(sess, cfg.WorkDir, cfg.CorpusRoot, lowDirs)
+	enf, restore := ApplyEnforcement(sess, cfg.WorkDir, cfg.CorpusRoot, destDirs)
 	res.Enforcement = enf
-	if low != nil {
-		defer syscall.CloseHandle(low.Token)
-	}
+	defer func() { enf.Restored = restore() }()
 	if enf.Why() != "" {
 		res.Evaluate(sc, len(g.ByGolden))
 		return res, nil
@@ -222,7 +219,7 @@ func RunOnce(cfg RunConfig) (*Result, error) {
 	outPath := filepath.Join(cfg.WorkDir, "installer-"+cfg.RunID+".out")
 
 	started := time.Now()
-	proc, err := StartInstaller(low, cfg.Tool, args, outPath, cfg.WorkDir)
+	proc, err := StartInstaller(sess, cfg.Tool, args, outPath, cfg.WorkDir)
 	if err != nil {
 		return nil, err
 	}

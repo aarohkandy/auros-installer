@@ -43,9 +43,6 @@ const (
 	logon32LogonInteractive = 2
 	logon32ProviderDefault  = 0
 
-	tokenElevationType = 18
-	tokenLinkedToken   = 19
-
 	securityImpersonation = 2
 	tokenPrimary          = 1
 	tokenAllAccess        = 0xF01FF
@@ -106,12 +103,16 @@ type UserSession struct {
 // prepare_windows.go wrote the redirection that points the known folders at the
 // corpus.
 //
-// The token is the user's FULL token where Windows will give one. A local
-// administrator's interactive logon is filtered by UAC, and the installer is a
-// program that needs administrative rights in phase 6, so running the test under
-// a filtered token would test a weaker program than the one that ships — and,
-// worse for this harness, would make "nothing was written to the system disk" a
-// weaker claim, because a filtered token cannot write to most of it anyway.
+// The token is the one the logon returns, a STANDARD user's: the account is
+// not an administrator (see CreateMigrationUser), and ApplyEnforcement refuses
+// to run the installer on a token that is elevated or holds Administrators. A
+// split UAC token is never swapped for its linked full one. The consequence,
+// stated: the installer's `manage-bde -status` needs administrative rights, so
+// BitLocker is reported unknown and the suspend step is planned anyway, which
+// is what the installer does wherever that probe cannot answer
+// (internal/sysdisk/probe_windows.go). Batch logon needs SeBatchLogonRight,
+// which a standard account lacks by default, so the interactive fallback below
+// is the path taken.
 func LogonMigrationUser(name, password string) (*UserSession, error) {
 	u, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
@@ -134,12 +135,9 @@ func LogonMigrationUser(name, password string) (*UserSession, error) {
 		}
 	}
 	s := &UserSession{Token: tok, name: name}
-	s.Elevated = true
-	if full, ok := linkedElevatedToken(tok); ok {
+	if s.Elevated, err = tokenIsElevated(tok); err != nil {
 		syscall.CloseHandle(tok)
-		s.Token = full
-	} else if isLimited(s.Token) {
-		s.Elevated = false
+		return nil, fmt.Errorf("gate3: reading %s's token: %w", name, err)
 	}
 	pi := profileInfo{UserName: u}
 	pi.Size = uint32(unsafe.Sizeof(pi))
@@ -190,38 +188,15 @@ func (s *UserSession) Close() {
 	}
 }
 
-func linkedElevatedToken(tok syscall.Handle) (syscall.Handle, bool) {
-	var et uint32
-	var n uint32
-	if err := syscall.GetTokenInformation(syscall.Token(tok), tokenElevationType,
-		(*byte)(unsafe.Pointer(&et)), 4, &n); err != nil {
-		return 0, false
+// tokenIsElevated is TOKEN_ELEVATION.TokenIsElevated (TokenElevation, 20).
+func tokenIsElevated(tok syscall.Handle) (bool, error) {
+	var el, n uint32
+	const tokenElevation = 20
+	if err := syscall.GetTokenInformation(syscall.Token(tok), tokenElevation,
+		(*byte)(unsafe.Pointer(&el)), 4, &n); err != nil {
+		return false, err
 	}
-	if et != 3 { // TokenElevationTypeLimited
-		return 0, false
-	}
-	var linked syscall.Handle
-	if err := syscall.GetTokenInformation(syscall.Token(tok), tokenLinkedToken,
-		(*byte)(unsafe.Pointer(&linked)), uint32(unsafe.Sizeof(linked)), &n); err != nil {
-		return 0, false
-	}
-	var primary syscall.Handle
-	r1, _, _ := procDuplicateTokenEx.Call(uintptr(linked), tokenAllAccess, 0,
-		securityImpersonation, tokenPrimary, uintptr(unsafe.Pointer(&primary)))
-	syscall.CloseHandle(linked)
-	if r1 == 0 {
-		return 0, false
-	}
-	return primary, true
-}
-
-func isLimited(tok syscall.Handle) bool {
-	var et, n uint32
-	if err := syscall.GetTokenInformation(syscall.Token(tok), tokenElevationType,
-		(*byte)(unsafe.Pointer(&et)), 4, &n); err != nil {
-		return false
-	}
-	return et == 3
+	return el != 0, nil
 }
 
 func tokenSID(tok syscall.Handle) (string, error) {

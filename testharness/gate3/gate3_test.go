@@ -340,7 +340,7 @@ func newResultForTest(kind Kind) *Result {
 		Source:          &TreeReport{Tree: "source", Expected: 9, HashMatches: 9},
 		Archive:         &TreeReport{Tree: "archive", Expected: 9, Present: 9, HashMatches: 9},
 		SystemDisk:      &SystemDiskReport{Records: 12, Excluded: 12},
-		Enforcement:     &Enforcement{Integrity: LowIntegritySID, Verified: true, Exemptions: []string{`C:\Users\auros-gate3`}},
+		Enforcement:     &Enforcement{Token: "standard", Verified: true, Exemptions: []string{`C:\Users\auros-gate3`}},
 		InstallerWrites: &WriteAudit{Events: 40},
 		Claims: &Claims{ClaimedVerified: true, VerifiedCount: 9, ReachedWall: true, Events: 30,
 			ArmPlanPrinted: true, SawPhaseEvents: true},

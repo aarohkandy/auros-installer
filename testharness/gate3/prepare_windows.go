@@ -76,7 +76,7 @@ var (
 	modnetapi32                 = syscall.NewLazyDLL("netapi32.dll")
 	procNetUserAdd              = modnetapi32.NewProc("NetUserAdd")
 	procNetUserDel              = modnetapi32.NewProc("NetUserDel")
-	procNetLocalGroupAddMembers = modnetapi32.NewProc("NetLocalGroupAddMembers")
+	procNetLocalGroupDelMembers = modnetapi32.NewProc("NetLocalGroupDelMembers")
 	procRegCreateKeyExW         = modadvapi32.NewProc("RegCreateKeyExW")
 	procRegSetValueExW          = modadvapi32.NewProc("RegSetValueExW")
 	procRegCloseKeyP            = modadvapi32.NewProc("RegCloseKey")
@@ -136,23 +136,23 @@ func CreateMigrationUser(name, password string) error {
 		return fmt.Errorf("gate3: NetUserAdd(%s) failed with %d (parm %d)", name, r1, parmErr)
 	}
 
-	// Administrators, because the installer is a program that needs
-	// administrative rights at the wall and the run must not be a test of a
-	// weaker program than the one that ships. It also makes the invariant check
-	// meaningful: a process that could not write to C: anyway proves much less
-	// by not writing to it.
+	// NOT an administrator: the installer runs on this account's standard
+	// token, so what it may write on C: is what a standard user may, and the
+	// rest is denied it directly (see ApplyEnforcement). Removed from
+	// Administrators in case an earlier harness version on the same machine put
+	// it there.
 	member, err := syscall.UTF16PtrFromString(hostname() + `\` + name)
 	if err != nil {
 		return err
 	}
 	mi := localgroupMembersInfo3{DomainAndName: member}
 	grp, _ := syscall.UTF16PtrFromString("Administrators")
-	r1, _, _ = procNetLocalGroupAddMembers.Call(0, uintptr(unsafe.Pointer(grp)), 3,
+	r1, _, _ = procNetLocalGroupDelMembers.Call(0, uintptr(unsafe.Pointer(grp)), 3,
 		uintptr(unsafe.Pointer(&mi)), 1)
 	switch r1 {
-	case 0, 1378: // NERR_Success, ERROR_MEMBER_IN_ALIAS
+	case 0, 1377: // NERR_Success, ERROR_MEMBER_NOT_IN_ALIAS
 	default:
-		return fmt.Errorf("gate3: NetLocalGroupAddMembers(%s) failed with %d", name, r1)
+		return fmt.Errorf("gate3: NetLocalGroupDelMembers(%s) failed with %d", name, r1)
 	}
 	return nil
 }
